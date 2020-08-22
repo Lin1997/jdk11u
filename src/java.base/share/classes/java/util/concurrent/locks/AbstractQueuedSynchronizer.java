@@ -650,16 +650,17 @@ public abstract class AbstractQueuedSynchronizer
     private Node addWaiter(Node mode) {
         Node node = new Node(mode);
 
+        // CLH入队操作: 自旋CAS设置新tail为当前node
         for (;;) {
             Node oldTail = tail;
             if (oldTail != null) {
-                node.setPrevRelaxed(oldTail);
-                if (compareAndSetTail(oldTail, node)) {
-                    oldTail.next = node;
-                    return node;
-                }
+                node.setPrevRelaxed(oldTail);           // 设置新node的prev指向旧tail
+                if (compareAndSetTail(oldTail, node)) { // CAS入队
+                    oldTail.next = node;        // 入队成功的话设置前驱节点next指向自己. 正如https://lin1997.github.io/2020/08/02/aqs.html#%E9%98%9F%E5%88%97
+                    return node;                // 中描述的,next指针只是一个优化,并不强制通过锁/CAS保证线程安全.
+                }                               // CAS失败的话重新进入循环.
             } else {
-                initializeSyncQueue();
+                initializeSyncQueue();          // 对于首次发生竞争导致的addWaiter(...), 需初始化CLH队列(说明CLH是在这懒加载的),然后重新进入循环.
             }
         }
     }
@@ -843,22 +844,22 @@ public abstract class AbstractQueuedSynchronizer
      */
     private static boolean shouldParkAfterFailedAcquire(Node pred, Node node) {
         int ws = pred.waitStatus;
-        if (ws == Node.SIGNAL)
+        if (ws == Node.SIGNAL)  // 前驱已经设置好"需要unpark"当前线程,所以当正占有锁的线程release时会unpark当前node
             /*
              * This node has already set status asking a release
              * to signal it, so it can safely park.
              */
-            return true;
-        if (ws > 0) {
+            return true;       // 所以可以安心的park当前线程了
+        if (ws > 0) {          // 否则,如果前驱节点已经CANCELLED了
             /*
              * Predecessor was cancelled. Skip over predecessors and
              * indicate retry.
              */
-            do {
-                node.prev = pred = pred.prev;
+            do {              // 重设当前节点的prev指针,跳过这些取消了的前驱节点,然后返回false表明应在调用者(acquireQueued)中重试获取锁.
+                node.prev = pred = pred.prev;   // node.prev=pred.prev; pred=pred.prev;
             } while (pred.waitStatus > 0);
             pred.next = node;
-        } else {
+        } else {              // 否则，当前驱节点是0或PROPAGATE,我们需要使用CAS设置前驱为SIGNAL,然后返回false表明应在调用者(acquireQueued)中重试获取锁.
             /*
              * waitStatus must be 0 or PROPAGATE.  Indicate that we
              * need a signal, but don't park yet.  Caller will need to
@@ -906,15 +907,18 @@ public abstract class AbstractQueuedSynchronizer
     final boolean acquireQueued(final Node node, int arg) {
         boolean interrupted = false;
         try {
+            // 重复地获取锁(这其中可能会多次阻塞和解阻塞)
             for (;;) {
                 final Node p = node.predecessor();
-                if (p == head && tryAcquire(arg)) {
-                    setHead(node);
-                    p.next = null; // help GC
-                    return interrupted;
+                if (p == head && tryAcquire(arg)) { // 如果当前节点前驱是head(Dummy Node),说明当前是第一个节点,就尝试获取锁
+                    // 获取成功的话就进行CLH出队操作,
+                    // 由于当前持有锁,所以下面的简单操作都是线程安全的:
+                    setHead(node);                  // 设置当前节点为head(当前节点成为了新Dummy Node)
+                    p.next = null; // help GC       // next置空
+                    return interrupted;             // 然后返回,线程将继续运行
                 }
-                if (shouldParkAfterFailedAcquire(p, node))
-                    interrupted |= parkAndCheckInterrupt();
+                if (shouldParkAfterFailedAcquire(p, node))  // 否则, 代表刚刚没有获取到锁,根据node状态并决定是否需要park线程(当且仅当前驱p.waitStatus==SIGNAL)
+                    interrupted |= parkAndCheckInterrupt(); // 当需要park时,阻塞线程.  在解阻塞后还需要看看是不是被interrupt了
             }
         } catch (Throwable t) {
             cancelAcquire(node);
@@ -1236,8 +1240,8 @@ public abstract class AbstractQueuedSynchronizer
      *        can represent anything you like.
      */
     public final void acquire(int arg) {
-        if (!tryAcquire(arg) &&
-            acquireQueued(addWaiter(Node.EXCLUSIVE), arg))
+        if (!tryAcquire(arg) &&                             // 先尝试获取锁,失败会立即返回
+            acquireQueued(addWaiter(Node.EXCLUSIVE), arg))  // 上面失败的话,将代表当前线程的等待节点(EXCLUSIVE模式)入队, 然后重复地获取锁(这其中可能会多次阻塞和解阻塞)
             selfInterrupt();
     }
 
@@ -2321,8 +2325,8 @@ public abstract class AbstractQueuedSynchronizer
      */
     private final void initializeSyncQueue() {
         Node h;
-        if (HEAD.compareAndSet(this, null, (h = new Node())))
-            tail = h;
+        if (HEAD.compareAndSet(this, null, (h = new Node())))   // CLH队列初始化只需通过CAS设置好一个DummyNode作为head
+            tail = h;                                                 // 成功的话(只有一个线程会成功),将tail也指向这个node即可.
     }
 
     /**

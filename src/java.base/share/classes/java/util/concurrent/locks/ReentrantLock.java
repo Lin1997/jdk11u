@@ -70,6 +70,12 @@ import jdk.internal.vm.annotation.ReservedStackAccess;
  * honor the fairness setting. It will succeed if the lock
  * is available even if other threads are waiting.
  *
+ * 下面是使用Lock的一个最佳实践:
+ * 1. 将Lock#lock()调用放在try语句块前: 防止了Lock#lock()调用抛异常,
+ * 而在finally中还调用Lock#unlock(), 最终导致IllegalMonitorStateException异常.
+ * 2. 紧接着跟着一个try语句块, 并将lock.unlock()放在finally语句块中,
+ * 保证最终会解锁.
+ *
  * <p>It is recommended practice to <em>always</em> immediately
  * follow a call to {@code lock} with a {@code try} block, most
  * typically in a before/after construction such as:
@@ -126,20 +132,20 @@ public class ReentrantLock implements Lock, java.io.Serializable {
         final boolean nonfairTryAcquire(int acquires) {
             final Thread current = Thread.currentThread();
             int c = getState();
-            if (c == 0) {
-                if (compareAndSetState(0, acquires)) {
-                    setExclusiveOwnerThread(current);
-                    return true;
+            if (c == 0) {   // 如果state为0, 代表还没有线程获取锁
+                if (compareAndSetState(0, acquires)) {  // 使用CAS设置AQS同步状态state为'1'
+                    setExclusiveOwnerThread(current);          // 设置成功代表获取锁成功, 设置互斥锁所属线程为当前线程
+                    return true;                               // 并返回成功
                 }
             }
-            else if (current == getExclusiveOwnerThread()) {
-                int nextc = c + acquires;
+            else if (current == getExclusiveOwnerThread()) {   // 否则,看看持有锁的线程是不是当前线程
+                int nextc = c + acquires;                      // 是则说明是锁重入, 需要将state+1
                 if (nextc < 0) // overflow
                     throw new Error("Maximum lock count exceeded");
-                setState(nextc);
+                setState(nextc);                               // 由于当前线程持有锁,所以简单的将这个volatile state设置为新值即可
                 return true;
             }
-            return false;
+            return false;       // 否则, 获取锁失败
         }
 
         @ReservedStackAccess
