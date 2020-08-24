@@ -108,6 +108,7 @@ void AbstractAssembler::flush() {
   ICache::invalidate_range(addr_at(0), offset());
 }
 
+// 用于将Label L绑定到当前代码位置，这样程序就能通过这个label跳转到这段代码执行（相当于汇编中的LABEL伪指令）
 void AbstractAssembler::bind(Label& L) {
   if (L.is_bound()) {
     // Assembler can bind a label more than once to the same place.

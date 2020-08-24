@@ -1142,6 +1142,7 @@ void InterpreterMacroAssembler::get_method_counters(Register method,
 }
 
 
+// 传入参数为表示当前对象锁的BasicObjectLock
 // Lock object
 //
 // Args:
@@ -1153,6 +1154,8 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
   assert(lock_reg == LP64_ONLY(c_rarg1) NOT_LP64(rdx),
          "The argument is only for looks. It must be c_rarg1");
 
+  // 如果要直接使用重量级锁(-XX:+UseHeavyMonitors)，
+  // 则直接进入InterpreterRuntime::monitorenter()执行
   if (UseHeavyMonitors) {
     call_VM(noreg,
             CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorenter),
@@ -1161,21 +1164,30 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
     Label done;
 
     const Register swap_reg = rax; // Must use rax for cmpxchg instruction
+                                  // cmpxchg指令必须使用rax寄存器存储老数据
     const Register tmp_reg = rbx; // Will be passed to biased_locking_enter to avoid a
                                   // problematic case where tmp_reg = no_reg.
     const Register obj_reg = LP64_ONLY(c_rarg3) NOT_LP64(rcx); // Will contain the oop
 
-    const int obj_offset = BasicObjectLock::obj_offset_in_bytes();
-    const int lock_offset = BasicObjectLock::lock_offset_in_bytes ();
-    const int mark_offset = lock_offset +
-                            BasicLock::displaced_header_offset_in_bytes();
+    const int obj_offset = BasicObjectLock::obj_offset_in_bytes();          // BasicObjectLock对象的_obj成员的offset
+    const int lock_offset = BasicObjectLock::lock_offset_in_bytes ();       // BasicObjectLock对象的_lock成员的offset
+    const int mark_offset = lock_offset +                                   // BasicObjectLock对象的_lock成员(BasicLock)的
+                            BasicLock::displaced_header_offset_in_bytes();  // displaced_header的offset
 
     Label slow_case;
 
+    // 被锁对象(lockee)的指针存放至obj_reg
     // Load object pointer into obj_reg
     movptr(obj_reg, Address(lock_reg, obj_offset));
 
+    // 如果虚拟机参数允许使用偏向锁(-XX:+/-UseBiasedLocking)
+    // 那么进入biased_locking_enter()中
     if (UseBiasedLocking) {
+      // lock_reg :表示当前对象锁的BasicObjectLock的指针
+      // obj_reg :被锁对象的指针
+      // done :标志着获取锁成功的Label
+      // slow_case :进入slow_case流程的Label
+      // 传入上述Label使得在函数中，可以根据情况回跳到这两处
       biased_locking_enter(lock_reg, obj_reg, swap_reg, tmp_reg, false, done, &slow_case);
     }
 
@@ -1185,22 +1197,39 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
     // Load (object->mark() | 1) into swap_reg %rax
     orptr(swap_reg, Address(obj_reg, oopDesc::mark_offset_in_bytes()));
 
+    // 将(对象的MarkWord | 1)的结果保存到BasicLock的displaced header
     // Save (object->mark() | 1) into BasicLock's displaced header
     movptr(Address(lock_reg, mark_offset), swap_reg);
 
     assert(lock_offset == 0,
            "displaced header must be first word in BasicObjectLock");
 
+    // 锁总线
     if (os::is_MP()) lock();
+    // 并将BasicObjectLock指针通过CAS(期盼值在swap_reg中)设置到被锁对象的MarkWord中
     cmpxchgptr(lock_reg, Address(obj_reg, oopDesc::mark_offset_in_bytes()));
+    /**
+     * |------------------------------------------------------------------------------|--------------------|
+     * |                                  Mark Word (64 bits)                         |       State        |
+     * |------------------------------------------------------------------------------|--------------------|
+     * |                       ptr_to_lock_record:62                         | lock:00|       轻量级锁      |
+     * |------------------------------------------------------------------------------|--------------------|
+     */
     if (PrintBiasedLockingStatistics) {
       cond_inc32(Assembler::zero,
                  ExternalAddress((address) BiasedLocking::fast_path_entry_count_addr()));
     }
+    // 若CAS成功，此时获取轻量级锁成功，跳转到done标签
     jcc(Assembler::zero, done);
 
     const int zero_bits = LP64_ONLY(7) NOT_LP64(3);
 
+    // 若CAS获取轻量级锁失败，则：
+    // 测试被锁对象MarkWord(oopMark)是否显然是一个栈指针，即满足：
+    //  1) mark最低3位为0 (JVM 的内存是以 8 字节长度对齐的)
+    //  2) rsp <= mark < mark + os::pagesize()
+    // 这3个测试可以巧妙地和并为下面2行代码
+    //
     // Test if the oopMark is an obvious stack pointer, i.e.,
     //  1) (mark & zero_bits) == 0, and
     //  2) rsp <= mark < mark + os::pagesize()
@@ -1213,6 +1242,8 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
     subptr(swap_reg, rsp);
     andptr(swap_reg, zero_bits - os::vm_page_size());
 
+    // 保存测试结果到BasicObjectLock对象的_lock成员(BasicLock)的displaced_header，
+    // 对于递归(锁重入)的情况，结果将是0
     // Save the test result, for recursive case, the result is zero
     movptr(Address(lock_reg, mark_offset), swap_reg);
 
@@ -1220,16 +1251,19 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
       cond_inc32(Assembler::zero,
                  ExternalAddress((address) BiasedLocking::fast_path_entry_count_addr()));
     }
+    // 对于递归(锁重入)的情况，跳转到done标签
+    // 否则继续运行slow_case获取重量级锁
     jcc(Assembler::zero, done);
 
     bind(slow_case);
 
+    // 进入InterpreterRuntime::monitorenter()中去尝试获取重量级锁
     // Call the runtime routine for slow case
     call_VM(noreg,
             CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorenter),
             lock_reg);
 
-    bind(done);
+    bind(done); // 到这表明获取锁成功，接下来就会返回到同步代码块里进行字节码的执行了
   }
 }
 

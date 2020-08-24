@@ -4334,6 +4334,9 @@ void TemplateTable::athrow() {
   __ jump(ExternalAddress(Interpreter::throw_exception_entry()));
 }
 
+// 栈布局如下面英语注释，其中：
+// expression stack(即操作数栈) 处于 monitor block 之上
+// monitor block 包含若干个 monitor entry
 //-----------------------------------------------------------------------------
 // Synchronization
 //
@@ -4354,6 +4357,7 @@ void TemplateTable::athrow() {
 void TemplateTable::monitorenter() {
   transition(atos, vtos);
 
+  // 被锁对象(lockee)不能为空
   // check for NULL object
   __ null_check(rax);
 
@@ -4372,59 +4376,89 @@ void TemplateTable::monitorenter() {
   // initialize entry pointer
   __ xorl(rmon, rmon); // points to free slot or NULL
 
+  // 从顶至底(低地址向高地址)遍历monitor block(栈结构如上面注释),
+  // 寻找一个空闲的monitor entry(BasicObjectLock)，并将指针保存至rmon
   // find a free slot in the monitor block (result in rmon)
   {
+    // 声明三个Label
     Label entry, loop, exit;
     __ movptr(rtop, monitor_block_top); // points to current entry,
                                         // starting with top-most entry
+                                        // 声明当前monitor block的top指针
     __ lea(rbot, monitor_block_bot);    // points to word before bottom
                                         // of monitor block
+                                        // 声明当前monitor block的bottom指针
     __ jmpb(entry);
 
-    __ bind(loop);
+    __ bind(loop);  // 绑定循环头Label，用于下面跳转回来
+    // 检查这个monitor entry是否已使用
     // check if current entry is used
     __ cmpptr(Address(rtop, BasicObjectLock::obj_offset_in_bytes()), (int32_t) NULL_WORD);
+    // 若未使用就记录至rmon
     // if not used then remember entry in rmon
     __ cmovptr(Assembler::equal, rmon, rtop);   // cmov => cmovptr
+    // 检查BasicObjectLock的_obj属性是否就是被锁对象(lockee)
     // check if current entry is for same object
     __ cmpptr(rax, Address(rtop, BasicObjectLock::obj_offset_in_bytes()));
+    // 是的话代表这是锁重入，就跳转到exit标签，停止搜索
     // if same object then stop searching
     __ jccb(Assembler::equal, exit);
+    // 否则指针移向向下一个monitor entry
     // otherwise advance to next entry
     __ addptr(rtop, entry_size);
     __ bind(entry);
+    // 检查指针是否到monitor block底了
     // check if bottom reached
     __ cmpptr(rtop, rbot);
+    // 没到底就跳转回loop标签，继续循环
     // if not at bottom then check this entry
     __ jcc(Assembler::notEqual, loop);
-    __ bind(exit);
+    __ bind(exit);  // 结束Label
   }
 
   __ testptr(rmon, rmon); // check if a slot has been found
+                          // 检查是否找到了空闲的monitor entry
   __ jcc(Assembler::notZero, allocated); // if found, continue with that one
+                                        // 如果找到，跳转到allocated中继续
 
+  // 若没有找到，就分配一个(实际上分配是指将操作数栈的内存空间划分给monitor block，同时操作数栈上移)
   // allocate one if there's no free slot
   {
     Label entry, loop;
+    // 1. 计算新的操作数栈指针与monitor block指针
     // 1. compute new pointers          // rsp: old expression stack top
+                                        // 此时rsp存放了原操作数底栈栈顶
     __ movptr(rmon, monitor_block_bot); // rmon: old expression stack bottom
+                                        // 让rmon存放原操作数栈栈底
     __ subptr(rsp, entry_size);         // move expression stack top
+                                        // rsp=rsp-entry_size (栈顶向下扩容，代表新操作数栈顶)
     __ subptr(rmon, entry_size);        // move expression stack bottom
+                                        // rmon=rmon-entry_size(rmod跟上，此时rmon代表新操作数栈底)
     __ mov(rtop, rsp);                  // set start value for copy loop
+                                        // 设置新monitor block的top指针，准备进入copy循环
     __ movptr(monitor_block_bot, rmon); // set new monitor block bottom
-    __ jmp(entry);
+                                        // 设置新monitor block的bottom指针
+    __ jmp(entry);  // 跳转到copy循环条件检查
+    // 2. 由于将操作数栈的部分空间划分给了monitor block，
+    // 因而需要从顶至底(低地址向高地址)将整个操作数栈内容到新位置
     // 2. move expression stack contents
     __ bind(loop);
     __ movptr(rbot, Address(rtop, entry_size)); // load expression stack
                                                 // word from old location
+                                                // 从旧位置(rtop+entry_size)处读取一个字长的数据到rbot(寄存器)
     __ movptr(Address(rtop, 0), rbot);          // and store it at new location
+                                                // 然后再保存到新位置（x86 mov指令不支持 内存->内存，故需要一个中间寄存器）
     __ addptr(rtop, wordSize);                  // advance to next word
-    __ bind(entry);
+                                                // 指针移向下一个字
+    __ bind(entry); // 循环条件检查
     __ cmpptr(rtop, rmon);                      // check if bottom reached
+                                                // 检查是否到新操作数栈栈底了
     __ jcc(Assembler::notEqual, loop);          // if not at bottom then
                                                 // copy next word
+                                                // 还没到就继续循环，复制下一个字
   }
 
+  // 执行到这说明已经找到空闲monitor entry，指针保存在rmon中
   // call run-time routine
   // rmon: points to monitor entry
   __ bind(allocated);
@@ -4435,8 +4469,10 @@ void TemplateTable::monitorenter() {
   // expression stack looks correct.
   __ increment(rbcp);
 
+  // 将被锁对象(lockee)存放至空闲BasicObjectLock中
   // store object
   __ movptr(Address(rmon, BasicObjectLock::obj_offset_in_bytes()), rax);
+  // 重要：跳转执行 lock_object 函数,传入的参数为前面的BasicObjectLock
   __ lock_object(rmon);
 
   // check to make sure this monitor doesn't cause stack overflow after locking

@@ -159,6 +159,12 @@ class Klass : public Metadata {
   // Biased locking implementation and statistics
   // (the 64-bit chunk goes first, to avoid some fragmentation)
   jlong    _last_biased_lock_bulk_revocation_time;
+  // _prototype_header是'类型'的'Mark Word'
+  // 初始时类的prototype_header为偏向锁态，即后三位为101，一旦发生了bulk_revoke,那么就会设为无锁态，即001
+  // bulk_revoke为批量撤销，每次类发生bulk_rebais时（类的所有对象重设偏向锁）
+  // 类prototype_header中的epoch就会+1，当epoch达到一个阈值时
+  // 就会发生bulk_revoke，撤销该类每个对象的偏向锁，这样该类的所有对象以后都不能使用偏向锁了
+  // 其实也就是虚拟机认为该对象不适合偏向锁
   markOop  _prototype_header;   // Used when biased locking is both enabled and disabled for this type
   jint     _biased_lock_revocation_count;
 

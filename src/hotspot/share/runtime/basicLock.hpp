@@ -32,7 +32,7 @@ class BasicLock {
   friend class VMStructs;
   friend class JVMCIVMStructs;
  private:
-  volatile markOop _displaced_header;
+  volatile markOop _displaced_header; // 备份对象头部的Mark Word
  public:
   markOop      displaced_header() const               { return _displaced_header; }
   void         set_displaced_header(markOop header)   { _displaced_header = header; }
@@ -45,6 +45,8 @@ class BasicLock {
   static int displaced_header_offset_in_bytes()       { return offset_of(BasicLock, _displaced_header); }
 };
 
+// BasicObjectLock用于保存特定的Java对象与基本锁的关联关系，
+// 在JVM运行时，BasicObjectLock对象(Lock Record)将放置在Java栈的栈帧中。
 // A BasicObjectLock associates a specific Java object with a BasicLock.
 // It is currently embedded in an interpreter frame.
 
@@ -58,7 +60,9 @@ class BasicObjectLock {
   friend class VMStructs;
  private:
   BasicLock _lock;                                    // the lock, must be double word aligned
+                                                      // 表示锁,内部维护着displaced_header字段
   oop       _obj;                                     // object holds the lock;
+                                                      // 表示持有该锁的Java对象
 
  public:
   // Manipulation

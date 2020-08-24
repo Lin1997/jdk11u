@@ -56,7 +56,7 @@ class oopDesc {
   friend class VMStructs;
   friend class JVMCIVMStructs;
  private:
-  volatile markOop _mark;
+  volatile markOop _mark; // markOop其实是指针类型，因此保证了_mark(Mark Word)长度为一个字长(8字节)
   union _metadata {
     Klass*      _klass;
     narrowKlass _compressed_klass;

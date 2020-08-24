@@ -2252,6 +2252,8 @@ void Assembler::lfence() {
   emit_int8((unsigned char)0xE8);
 }
 
+// IA32 LOCK前缀对应的机器码，见：
+// https://software.intel.com/sites/default/files/managed/39/c5/325462-sdm-vol-1-2abcd-3abcd.pdf#page=1158
 void Assembler::lock() {
   emit_int8((unsigned char)0xF0);
 }
