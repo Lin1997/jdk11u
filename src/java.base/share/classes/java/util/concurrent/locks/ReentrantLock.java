@@ -150,16 +150,16 @@ public class ReentrantLock implements Lock, java.io.Serializable {
 
         @ReservedStackAccess
         protected final boolean tryRelease(int releases) {
-            int c = getState() - releases;
-            if (Thread.currentThread() != getExclusiveOwnerThread())
+            int c = getState() - releases;                              // 代表锁重入次数的同步状态state-1
+            if (Thread.currentThread() != getExclusiveOwnerThread())    // 确保执行release操作的线程是持有锁的线程
                 throw new IllegalMonitorStateException();
-            boolean free = false;
-            if (c == 0) {
-                free = true;
-                setExclusiveOwnerThread(null);
+            boolean free = false;                                       // 且由于持有锁,下面的简单操作都是并发安全的
+            if (c == 0) {                                               // 如果state-1后为0
+                free = true;                                            // 代表锁完全释放
+                setExclusiveOwnerThread(null);                          // 需将持有锁的线程置null
             }
-            setState(c);
-            return free;
+            setState(c);        // 设置新state
+            return free;        // 返回结果
         }
 
         protected final boolean isHeldExclusively() {
@@ -219,18 +219,18 @@ public class ReentrantLock implements Lock, java.io.Serializable {
         protected final boolean tryAcquire(int acquires) {
             final Thread current = Thread.currentThread();
             int c = getState();
-            if (c == 0) {
-                if (!hasQueuedPredecessors() &&
-                    compareAndSetState(0, acquires)) {
-                    setExclusiveOwnerThread(current);
-                    return true;
+            if (c == 0) {   // 如果state为0, 代表还没有线程获取锁
+                if (!hasQueuedPredecessors() &&                 // 对于公平锁,需要先检查自己是否是第一个节点(不包括dummy node)
+                    compareAndSetState(0, acquires)) {   // 如果是,则使用CAS设置AQS同步状态state为'1'
+                    setExclusiveOwnerThread(current);           // 设置成功代表获取锁成功, 设置互斥锁所属线程为当前线程
+                    return true;                                // 并返回成功
                 }
             }
-            else if (current == getExclusiveOwnerThread()) {
-                int nextc = c + acquires;
+            else if (current == getExclusiveOwnerThread()) {   // 否则,看看持有锁的线程是不是当前线程
+                int nextc = c + acquires;                      // 是则说明是锁重入, 需要将state+1
                 if (nextc < 0)
                     throw new Error("Maximum lock count exceeded");
-                setState(nextc);
+                setState(nextc);                               // 由于当前线程持有锁,所以简单的将这个volatile state设置为新值即可
                 return true;
             }
             return false;
