@@ -1106,6 +1106,7 @@ void MacroAssembler::reserved_stack_check() {
     bind(no_reserved_zone_enabling);
 }
 
+// 偏向锁获取逻辑.
 // lock_reg :表示[表示当前对象锁的BasicObjectLock]的指针
 // obj_reg :被锁对象的指针
 // done :标志着获取锁成功的Label
@@ -1141,8 +1142,9 @@ int MacroAssembler::biased_locking_enter(Register lock_reg,
   // First check to see whether biasing is even enabled for this object
   Label cas_label;
   int null_check_offset = -1;
-  // 如果swap_reg中没存Mark Word，那么就先将Mark Word存入swap_reg中。
-  if (!swap_reg_contains_mark) {
+  // 如果caller调用本函数时,swap_reg中没存Mark Word，
+  // 那么就先将Mark Word存入swap_reg中.
+  if (!swap_reg_contains_mark) {  //  !false=true
     null_check_offset = offset();
     movptr(swap_reg, mark_addr);
   }

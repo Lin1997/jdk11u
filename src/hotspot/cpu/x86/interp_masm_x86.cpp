@@ -1182,6 +1182,7 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
 
     // 如果虚拟机参数允许使用偏向锁(-XX:+/-UseBiasedLocking)
     // 那么进入biased_locking_enter()中
+    // 执行偏向锁获取逻辑.
     if (UseBiasedLocking) {
       // lock_reg :表示当前对象锁的BasicObjectLock的指针
       // obj_reg :被锁对象的指针
@@ -1190,6 +1191,8 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
       // 传入上述Label使得在函数中，可以根据情况回跳到这两处
       biased_locking_enter(lock_reg, obj_reg, swap_reg, tmp_reg, false, done, &slow_case);
     }
+
+    // 获取偏向锁失败,则执行轻量级锁获取逻辑.
 
     // Load immediate 1 into swap_reg %rax
     movl(swap_reg, (int32_t)1);
@@ -1243,7 +1246,9 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
     andptr(swap_reg, zero_bits - os::vm_page_size());
 
     // 保存测试结果到BasicObjectLock对象的_lock成员(BasicLock)的displaced_header，
-    // 对于递归(锁重入)的情况，结果将是0
+    // 对于递归(锁重入)的情况，结果将是0.
+    // 也就是说,对于锁重入,只需设置Lock Record的Displaced Mark Word为null.
+    // 这个Lock Record起到了一个重入计数器的作用.
     // Save the test result, for recursive case, the result is zero
     movptr(Address(lock_reg, mark_offset), swap_reg);
 
@@ -1251,8 +1256,10 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
       cond_inc32(Assembler::zero,
                  ExternalAddress((address) BiasedLocking::fast_path_entry_count_addr()));
     }
-    // 对于递归(锁重入)的情况，跳转到done标签
-    // 否则继续运行slow_case获取重量级锁
+    // 对于递归(锁重入)的情况，跳转到done标签,
+    // 代表轻量级锁重入成功,
+    // 否则继续运行slow_case,
+    // 执行重量级锁获取逻辑.
     jcc(Assembler::zero, done);
 
     bind(slow_case);

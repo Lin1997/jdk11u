@@ -753,6 +753,7 @@ void InterpreterRuntime::resolve_get_put(JavaThread* thread, Bytecodes::Code byt
 }
 
 
+// 重量级锁获取逻辑.
 //------------------------------------------------------------------------------------------------------------------------
 // Synchronization
 //

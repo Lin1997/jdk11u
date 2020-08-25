@@ -4361,8 +4361,10 @@ void TemplateTable::monitorenter() {
   // check for NULL object
   __ null_check(rax);
 
+  // 计算monitor block top的地址
   const Address monitor_block_top(
         rbp, frame::interpreter_frame_monitor_block_top_offset * wordSize);
+  // 计算monitor block bot的地址 = monitor block top的地址
   const Address monitor_block_bot(
         rbp, frame::interpreter_frame_initial_sp_offset * wordSize);
   const int entry_size = frame::interpreter_frame_monitor_size() * wordSize;
@@ -4384,13 +4386,13 @@ void TemplateTable::monitorenter() {
     Label entry, loop, exit;
     __ movptr(rtop, monitor_block_top); // points to current entry,
                                         // starting with top-most entry
-                                        // 声明当前monitor block的top指针
+                                        // 声明当前monitor block的top entry
     __ lea(rbot, monitor_block_bot);    // points to word before bottom
                                         // of monitor block
                                         // 声明当前monitor block的bottom指针
-    __ jmpb(entry);
+    __ jmpb(entry); // 先跳转到copy循环条件检查
 
-    __ bind(loop);  // 绑定循环头Label，用于下面跳转回来
+    __ bind(loop);  // 绑定copy循环的循环头Label，用于下面跳转回来
     // 检查这个monitor entry是否已使用
     // check if current entry is used
     __ cmpptr(Address(rtop, BasicObjectLock::obj_offset_in_bytes()), (int32_t) NULL_WORD);
@@ -4427,7 +4429,7 @@ void TemplateTable::monitorenter() {
     Label entry, loop;
     // 1. 计算新的操作数栈指针与monitor block指针
     // 1. compute new pointers          // rsp: old expression stack top
-                                        // 此时rsp存放了原操作数底栈栈顶
+                                        // 此时rsp存放了原操作数栈栈顶
     __ movptr(rmon, monitor_block_bot); // rmon: old expression stack bottom
                                         // 让rmon存放原操作数栈栈底
     __ subptr(rsp, entry_size);         // move expression stack top
@@ -4475,10 +4477,12 @@ void TemplateTable::monitorenter() {
   // 重要：跳转执行 lock_object 函数,传入的参数为前面的BasicObjectLock
   __ lock_object(rmon);
 
+  // 获取锁的流程结束,接下来确保本次获取锁没有导致stack overflow
   // check to make sure this monitor doesn't cause stack overflow after locking
   __ save_bcp();  // in case of exception
   __ generate_stack_overflow_check(0);
 
+  // 锁获取完成，继续执行下一条字节码
   // The bcp has already been incremented. Just need to dispatch to
   // next instruction.
   __ dispatch_next(vtos);
