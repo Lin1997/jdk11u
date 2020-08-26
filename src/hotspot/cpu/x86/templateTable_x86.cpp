@@ -4334,9 +4334,10 @@ void TemplateTable::athrow() {
   __ jump(ExternalAddress(Interpreter::throw_exception_entry()));
 }
 
-// 栈布局如下面英语注释，其中：
-// expression stack(即操作数栈) 处于 monitor block 之上
-// monitor block 包含若干个 monitor entry
+// 栈布局如下面英语注释，更具体的见frame_x86.hpp的注释. 其中：
+// expression stack(即操作数栈) 处于 monitor block 之上,
+// monitor block 包含若干个 monitor entry,
+// monitor block bot存放了monitor block size.
 //-----------------------------------------------------------------------------
 // Synchronization
 //
@@ -4471,7 +4472,7 @@ void TemplateTable::monitorenter() {
   // expression stack looks correct.
   __ increment(rbcp);
 
-  // 将被锁对象(lockee)存放至空闲BasicObjectLock中
+  // 将被锁对象(lockee)存放至空闲BasicObjectLock(Lock Record)的obj字段中
   // store object
   __ movptr(Address(rmon, BasicObjectLock::obj_offset_in_bytes()), rax);
   // 重要：跳转执行 lock_object 函数,传入的参数为前面的BasicObjectLock
@@ -4482,7 +4483,7 @@ void TemplateTable::monitorenter() {
   __ save_bcp();  // in case of exception
   __ generate_stack_overflow_check(0);
 
-  // 锁获取完成，继续执行下一条字节码
+  // 锁获取完成，继续执行下一条字节码. bcp即byte code pointer
   // The bcp has already been incremented. Just need to dispatch to
   // next instruction.
   __ dispatch_next(vtos);

@@ -753,7 +753,7 @@ void InterpreterRuntime::resolve_get_put(JavaThread* thread, Bytecodes::Code byt
 }
 
 
-// 重量级锁获取逻辑.
+// 偏向锁的撤销逻辑以及锁升级(膨胀)逻辑.
 //------------------------------------------------------------------------------------------------------------------------
 // Synchronization
 //
@@ -773,6 +773,7 @@ IRT_ENTRY_NO_ASYNC(void, InterpreterRuntime::monitorenter(JavaThread* thread, Ba
   assert(Universe::heap()->is_in_reserved_or_null(h_obj()),
          "must be NULL or an object");
   if (UseBiasedLocking) {
+    // 在这里处理偏向锁撤销的逻辑,而不是直接进行锁膨胀(升级)
     // Retry fast entry if bias is revoked to avoid unnecessary inflation
     ObjectSynchronizer::fast_enter(h_obj, elem->lock(), true, CHECK);
   } else {

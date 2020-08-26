@@ -663,7 +663,7 @@ class SkipGCALot : public StackObj {
 void VMThread::execute(VM_Operation* op) {
   Thread* t = Thread::current();
 
-  if (!t->is_VM_thread()) {
+  if (!t->is_VM_thread()) {   // case 1: 如果不是虚拟机线程，即普通Java线程
     SkipGCALot sgcalot(t);    // avoid re-entrant attempts to gc-a-lot
     // JavaThread or WatcherThread
     bool concurrent = op->evaluate_concurrently();
@@ -672,6 +672,7 @@ void VMThread::execute(VM_Operation* op) {
       t->check_for_valid_safepoint_state(true);
     }
 
+    // 进行前置处理，根据返回值确定是否继续
     // New request from Java thread, evaluate prologue
     if (!op->doit_prologue()) {
       return;   // op was cancelled
@@ -691,6 +692,7 @@ void VMThread::execute(VM_Operation* op) {
       ticket = t->vm_operation_ticket();
     }
 
+    // 添加到VM operation队列等待执行
     // Add VM operation to list of waiting threads. We are guaranteed not to block while holding the
     // VMOperationQueue_lock, so we can block without a safepoint check. This allows vm operation requests
     // to be queued up during a safepoint synchronization.
@@ -719,9 +721,10 @@ void VMThread::execute(VM_Operation* op) {
     }
 
     if (execute_epilog) {
+      // 进行后置处理
       op->doit_epilogue();
     }
-  } else {
+  } else {  // case 2: 如果已经是虚拟机线程
     // invoked by VM thread; usually nested VM operation
     assert(t->is_VM_thread(), "must be a VM thread");
     VM_Operation* prev_vm_operation = vm_operation();
@@ -741,6 +744,7 @@ void VMThread::execute(VM_Operation* op) {
     HandleMark hm(t);
     _cur_vm_operation = op;
 
+    // evaluate()会回调VM_Operation类的doit()虚函数
     if (op->evaluate_at_safepoint() && !SafepointSynchronize::is_at_safepoint()) {
       SafepointSynchronize::begin();
       op->evaluate();

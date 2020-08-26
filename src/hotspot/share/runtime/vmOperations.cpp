@@ -64,7 +64,7 @@ void VM_Operation::evaluate() {
     print_on_error(&ls);
     ls.cr();
   }
-  doit();
+  doit(); // 回调doit()虚函数
   if (lt.is_enabled()) {
     LogStream ls(lt);
     ls.print("end ");

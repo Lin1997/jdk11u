@@ -1155,11 +1155,12 @@ int MacroAssembler::biased_locking_enter(Register lock_reg,
   // 即(是否偏向锁+锁标志位)
   andptr(tmp_reg, markOopDesc::biased_lock_mask_in_place);
   // 将上面结果，即(是否偏向锁+锁标志位)和biased_lock_pattern再次比较(biased_lock_pattern为5，即101)
-  // 如果不相等，则表明不为匿名偏向状态，需要跳往cas_label，返回并交由调用者尝试获取轻量级锁(通过CAS操作)；
-  // 否则即为匿名偏向状态，接着往下走
+  // 如果不相等，则表明不为偏向模式，需要跳往cas_label，返回并交由调用者尝试获取轻量级锁(通过CAS操作)；
+  // 否则即为偏向模式，接着往下走
   cmpptr(tmp_reg, markOopDesc::biased_lock_pattern);
-  // 偏向字段存放在对象头中，现在需要检查对象的偏向线程和epoch值是否是当前的
   jcc(Assembler::notEqual, cas_label);
+
+  // 偏向字段存放在对象头中，现在需要检查对象的偏向线程和epoch值是否是当前的
   // The bias pattern is present in the object's header. Need to check
   // whether the bias owner and the epoch are both still current.
 #ifndef _LP64
@@ -1175,10 +1176,10 @@ int MacroAssembler::biased_locking_enter(Register lock_reg,
   }
   // 通过被锁对象的对象头的klass指针，取出klass的prototype_header，并存至tmp_reg
   // 它是该'类型'的'Mark Word'
-  // 初始时类的prototype_header为偏向锁态，即后三位为101，一旦发生了bulk_revoke,那么就会设为无锁态，即001
-  // bulk_revoke为批量撤销，每次类发生bulk_rebais时（类的所有对象重设偏向锁）
+  // 初始时类的prototype_header为偏向锁态，即后三位为101，一旦发生了bulk_revoke,那么就会设为无锁态，即001.
+  // 作用: 每次类发生bulk_rebais时（类的所有对象重设偏向锁）
   // 类prototype_header中的epoch就会+1，当epoch达到一个阈值时
-  // 就会发生bulk_revoke，撤销该类每个对象的偏向锁，这样该类的所有对象以后都不能使用偏向锁了
+  // 就会发生bulk_revoke(批量撤销)，撤销该类每个对象的偏向锁，这样该类的所有对象以后都不能使用偏向锁了
   // 其实也就是虚拟机认为该对象不适合偏向锁
   load_prototype_header(tmp_reg, obj_reg);
 #ifdef _LP64
@@ -1228,7 +1229,7 @@ int MacroAssembler::biased_locking_enter(Register lock_reg,
   jccb(Assembler::notZero, try_revoke_bias);
 
   // 通过上面检查，表明当前类型还可偏向，我们需要再看看当前epoch是否有效，
-  // 即对象mark work的epoch与prototype header的epoch相等，
+  // 即对象mark work的epoch与class中的prototype header的epoch相等，
   // 如果不相等，尝试将对象重偏向至当前线程
   // Biasing is still enabled for this data type. See whether the
   // epoch of the current bias is still valid, meaning that the epoch

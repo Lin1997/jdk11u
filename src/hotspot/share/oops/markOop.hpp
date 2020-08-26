@@ -229,6 +229,9 @@ class markOopDesc: public oopDesc {
   bool is_marked()   const {
     return (mask_bits(value(), lock_mask_in_place) == marked_value);
   }
+  // 判断对象锁是否为是无锁状态(中立的(neutral)).
+  // 这里的 biased_lock_mask_in_place 是 7, 即二进制111
+  // unlocked_value 值是 1
   bool is_neutral()  const { return (mask_bits(value(), biased_lock_mask_in_place) == unlocked_value); }
 
   // Special temporary state of the markOop while being inflated.

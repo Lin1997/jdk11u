@@ -1264,7 +1264,7 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
 
     bind(slow_case);
 
-    // 进入InterpreterRuntime::monitorenter()中去尝试获取重量级锁
+    // 进入InterpreterRuntime::monitorenter()中去尝试撤销偏向锁或进行锁膨胀(获取重量级锁)
     // Call the runtime routine for slow case
     call_VM(noreg,
             CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorenter),

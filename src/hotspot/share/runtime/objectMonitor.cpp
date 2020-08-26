@@ -259,6 +259,7 @@ void ObjectMonitor::operator delete[] (void *p) {
   operator delete(p);
 }
 
+// 膨胀完成之后，会调用enter方法.
 // -----------------------------------------------------------------------------
 // Enter support
 
@@ -267,6 +268,7 @@ void ObjectMonitor::enter(TRAPS) {
   // and to reduce RTS->RTO cache line upgrades on SPARC and IA32 processors.
   Thread * const Self = THREAD;
 
+  // owner为null代表无锁状态，如果能CAS设置成功，则当前线程直接获得锁
   void * cur = Atomic::cmpxchg(Self, &_owner, (void*)NULL);
   if (cur == NULL) {
     // Either ASSERT _recursions == 0 or explicitly set _recursions = 0.
@@ -275,15 +277,19 @@ void ObjectMonitor::enter(TRAPS) {
     return;
   }
 
+  // 如果是重入的情况
   if (cur == Self) {
     // TODO-FIXME: check for integer overflow!  BUGID 6557169.
     _recursions++;
     return;
   }
 
+  // 当前线程是之前持有轻量级锁的线程。由轻量级锁膨胀且第一次调用enter方法，那cur是指向Lock Record的指针
   if (Self->is_lock_owned ((address)cur)) {
     assert(_recursions == 0, "internal state error");
+    // 重入计数重置为1
     _recursions = 1;
+    // 设置owner字段为当前线程（之前owner是指向Lock Record的指针）
     // Commute owner from a thread-specific on-stack BasicLockObject address to
     // a full-fledged "Thread *".
     _owner = Self;
@@ -299,7 +305,9 @@ void ObjectMonitor::enter(TRAPS) {
   // transitions.  The following spin is strictly optional ...
   // Note that if we acquire the monitor from an initial spin
   // we forgo posting JVMTI events and firing DTRACE probes.
+  // 在调用系统的同步操作之前，先尝试自旋获得锁
   if (Knob_SpinEarly && TrySpin (Self) > 0) {
+    //自旋的过程中获得了锁，则直接返回
     assert(_owner == Self, "invariant");
     assert(_recursions == 0, "invariant");
     assert(((oop)(object()))->mark() == markOopDesc::encode(this), "invariant");
@@ -352,6 +360,7 @@ void ObjectMonitor::enter(TRAPS) {
       // cleared by handle_special_suspend_equivalent_condition()
       // or java_suspend_self()
 
+      // 在该方法中调用系统同步操作(进入队列将当前线程阻塞)
       EnterI(THREAD);
 
       if (!ExitSuspendEquivalent(jt)) break;
@@ -418,6 +427,10 @@ void ObjectMonitor::enter(TRAPS) {
   OM_PERFDATA_OP(ContendedLockAttempts, inc());
 }
 
+//尝试通过 cas 操作将 _owner 字段设置为 Self，
+// 其中 _owner 表示当前 ObjectMonitor 对象锁持有的线程指针，
+// Self 指向当前执行的线程。
+// 如果设置上了，表示当前线程获得了锁，否则没有获得。
 // Caveat: TryLock() is not necessarily serializing if it returns failure.
 // Callers must compensate as needed.
 
@@ -439,11 +452,13 @@ int ObjectMonitor::TryLock(Thread * Self) {
 
 #define MAX_RECHECK_INTERVAL 1000
 
+// 进入队列将当前线程阻塞
 void ObjectMonitor::EnterI(TRAPS) {
   Thread * const Self = THREAD;
   assert(Self->is_Java_thread(), "invariant");
-  assert(((JavaThread *) Self)->thread_state() == _thread_blocked, "invariant");
+  assert  (((JavaThread *) Self)->thread_state() == _thread_blocked, "invariant");
 
+  // 先执行TryLock
   // Try the lock - TATAS
   if (TryLock (Self) > 0) {
     assert(_succ != Self, "invariant");
@@ -454,6 +469,13 @@ void ObjectMonitor::EnterI(TRAPS) {
 
   DeferredInitialize();
 
+  // 在将自己入队钱再次重试,
+  // 其实是为了在入队阻塞线程之前的最后检查，防止线程无谓地进行状态切换。
+  // 但是为什么执行两次？其实第下面的英文的注释已经说明了，这么做有一些微妙的亲和力影响？什么是亲和力？
+  // 这是很多操作系统中都有的一种 CPU 执行调度逻辑，说的是，如果在过去一段时间内，
+  // 某个线程尝试获取某种资源一直失败，那么系统在后面会倾向于将该资源分配给这个线程。
+  // 这里我们前后两次执行，就是告诉系统当前线程「迫切」想要获得这个 cas 资源，如果可以用的话尽量分配给它。
+  // 当然这种亲和力不是一种得到保证的协议，因此这种操作只能是一种积极的、并且无害的操作。
   // We try one round of spinning *before* enqueueing Self.
   //
   // If the _owner is ready but OFFPROC we could use a YieldTo()
@@ -473,6 +495,7 @@ void ObjectMonitor::EnterI(TRAPS) {
   assert(_owner != Self, "invariant");
   assert(_Responsible != Self, "invariant");
 
+  // 两次「微妙」的 try lock 之后仍然失败，那么就只能乖乖入队阻塞了.
   // Enqueue "Self" on ObjectMonitor's _cxq.
   //
   // Node acts as a proxy for Self.
@@ -482,11 +505,17 @@ void ObjectMonitor::EnterI(TRAPS) {
   // as well as eliminate a subset of ABA issues.
   // TODO: eliminate ObjectWaiter and enqueue either Threads or Events.
 
+  // 创建一个 ObjectWaiter 对象，
+  // 这个对象将当前线程的对象（注意是 JavaThread 对象）包裹起来.
   ObjectWaiter node(Self);
   Self->_ParkEvent->reset();
   node._prev   = (ObjectWaiter *) 0xBAD;
   node.TState  = ObjectWaiter::TS_CXQ;
 
+  // 入队.
+  // 正如注释中说的那样，我们是要将当前节点放到 CXQ 队列的头部，
+  // 将节点的 next 指针通过 cas 操作指向 _cxq 指针就完成了入队操作。
+  // 如果入队成功，则退出当前循环，否则再次尝试 lock，因为可能这个时候会成功。
   // Push "Self" onto the front of the _cxq.
   // Once on cxq/EntryList, Self stays on-queue until it acquires the lock.
   // Note that spinning tends to reduce the rate at which threads
@@ -550,6 +579,10 @@ void ObjectMonitor::EnterI(TRAPS) {
   int nWakeups = 0;
   int recheckInterval = 1;
 
+  // 这个循环主要执行三件事：
+  // 1. 尝试获取锁
+  // 2. park 当前线程
+  // 3. 再次尝试获取锁
   for (;;) {
 
     if (TryLock(Self) > 0) break;
