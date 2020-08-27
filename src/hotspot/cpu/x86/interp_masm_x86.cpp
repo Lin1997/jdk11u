@@ -1155,7 +1155,7 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
          "The argument is only for looks. It must be c_rarg1");
 
   // 如果要直接使用重量级锁(-XX:+UseHeavyMonitors)，
-  // 则直接进入InterpreterRuntime::monitorenter()执行
+  // 则直接调用InterpreterRuntime::monitorenter().
   if (UseHeavyMonitors) {
     // (千万别忘了,我们现在是在为TemplateInterpreter初始化生成
     // 实现字节码逻辑的汇编代码模板,
@@ -1201,6 +1201,7 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
     // Load immediate 1 into swap_reg %rax
     movl(swap_reg, (int32_t)1);
 
+    // 将(对象的MarkWord | 1)的结果保存到swap_reg,作为下面CAS的预期旧值.
     // Load (object->mark() | 1) into swap_reg %rax
     orptr(swap_reg, Address(obj_reg, oopDesc::mark_offset_in_bytes()));
 
@@ -1213,7 +1214,9 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
 
     // 锁总线
     if (os::is_MP()) lock();
-    // 并将BasicObjectLock指针通过CAS(期盼值在swap_reg中)设置到被锁对象的MarkWord中
+    // 并将BasicObjectLock(Lock Record)的地址通过CAS(期盼值在swap_reg中)设置到被锁对象的MarkWord中,
+    // 由于有内存字节对齐,这个地址的最低两位肯定为00,因此成功设置后mark word的锁标志位也成了00(轻量级锁状态).
+    // 若当前锁的状态不是无锁状态，则CAS获取轻量级锁失败.
     cmpxchgptr(lock_reg, Address(obj_reg, oopDesc::mark_offset_in_bytes()));
     /**
      * |------------------------------------------------------------------------------|--------------------|
@@ -1231,7 +1234,7 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
 
     const int zero_bits = LP64_ONLY(7) NOT_LP64(3);
 
-    // 若CAS获取轻量级锁失败，则：
+    // 若CAS获取轻量级锁失败，则需要判断是否是递归(锁重入)的情况：
     // 测试被锁对象MarkWord(oopMark)是否显然是一个栈指针，即满足：
     //  1) mark最低3位为0 (JVM 的内存是以 8 字节长度对齐的)
     //  2) rsp <= mark < mark + os::pagesize()
@@ -1249,9 +1252,8 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
     subptr(swap_reg, rsp);
     andptr(swap_reg, zero_bits - os::vm_page_size());
 
-    // 保存测试结果到BasicObjectLock对象的_lock成员(BasicLock)的displaced_header，
     // 对于递归(锁重入)的情况，结果将是0.
-    // 也就是说,对于锁重入,只需设置Lock Record的Displaced Mark Word为null.
+    // 也就是说,对于锁重入,只需设置这个新Lock Record的Displaced Mark Word为null.
     // 这个Lock Record起到了一个重入计数器的作用.
     // Save the test result, for recursive case, the result is zero
     movptr(Address(lock_reg, mark_offset), swap_reg);
@@ -1268,7 +1270,7 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
 
     bind(slow_case);
 
-    // 进入InterpreterRuntime::monitorenter()中去尝试撤销偏向锁或进行锁膨胀(获取重量级锁)
+    // 调用InterpreterRuntime::monitorenter()中去尝试撤销偏向锁或进行锁膨胀(获取重量级锁)
     // Call the runtime routine for slow case
     call_VM(noreg,
             CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorenter),

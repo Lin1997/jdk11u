@@ -59,6 +59,7 @@ class ObjectWaiter : public StackObj {
   void wait_reenter_end(ObjectMonitor *mon);
 };
 
+// ObjectMonitor类实现了Java的重量级锁. 轻量级锁会因为竞争或者调用Object.wait()方法.
 // The ObjectMonitor class implements the heavyweight version of a
 // JavaMonitor. The lightweight BasicLock/stack lock version has been
 // inflated into an ObjectMonitor. This inflation is typically due to
@@ -71,26 +72,33 @@ class ObjectWaiter : public StackObj {
 // changes in this class must be careful to not break JvmtiRawMonitor.
 // These two subsystems should be separated.
 //
+// ObjectMonitor的布局 介绍/重点/限制 如下:(其实是关于伪共享和缓存局部性优化的内容)
 // ObjectMonitor Layout Overview/Highlights/Restrictions:
 //
+// - 成员变量_header存储在起始地址,displaced header(mark word的副本)会存储在该变量.
 // - The _header field must be at offset 0 because the displaced header
 //   from markOop is stored there. We do not want markOop.hpp to include
 //   ObjectMonitor.hpp to avoid exposing ObjectMonitor everywhere. This
 //   means that ObjectMonitor cannot inherit from any other class nor can
 //   it use any virtual member functions. This restriction is critical to
 //   the proper functioning of the VM.
+// - _header字段与_owner字段的内存分布需要离的足够远,来防止线程并行访问带来的"伪共享"问题.
 // - The _header and _owner fields should be separated by enough space
 //   to avoid false sharing due to parallel access by different threads.
 //   This is an advisory recommendation.
+// - 一般的ObjectMonitor字段分布如下:
 // - The general layout of the fields in ObjectMonitor is:
 //     _header
 //     <lightly_used_fields>
 //     <optional padding>
 //     _owner
 //     <remaining_fields>
+// - JVM假设写操作顺序和平台的内存对齐能保证_owner字段与<remaining_fields>
+//   可以并行地被不同线程读取.
 // - The VM assumes write ordering and machine word alignment with
 //   respect to the _owner field and the <remaining_fields> that can
 //   be read in parallel by other threads.
+// - 通常来说短时间内会被一起访问的字段应该被放置在邻近的内存空间,来利用缓存的空间局部性.
 // - Generally fields that are accessed closely together in time should
 //   be placed proximally in space to promote data cache locality. That
 //   is, temporal locality should condition spatial locality.

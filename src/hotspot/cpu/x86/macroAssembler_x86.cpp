@@ -1231,7 +1231,7 @@ int MacroAssembler::biased_locking_enter(Register lock_reg,
 
   // 通过上面检查，表明当前类型还可偏向，我们需要再看看当前epoch是否有效，
   // 即对象mark work的epoch与class中的prototype header的epoch相等，
-  // 如果不相等，尝试将对象重偏向至当前线程
+  // 如果不相等，说明发生了批量重偏向,尝试将对象重偏向至当前线程
   // Biasing is still enabled for this data type. See whether the
   // epoch of the current bias is still valid, meaning that the epoch
   // bits of the mark word are equal to the epoch bits of the
@@ -1295,7 +1295,12 @@ int MacroAssembler::biased_locking_enter(Register lock_reg,
   if (slow_case != NULL) {
     jcc(Assembler::notZero, *slow_case);
   }
-  jmp(done);  // 完成了偏向锁的获取，跳转到done继续执行字节码
+  jmp(done);  // 完成了偏向锁的获取，跳转到done继续执行字节码.偏向锁的Mark Word状态如下:
+  // |------------------------------------------------------------------------------|--------------------|
+  // |                                  Mark Word (64 bits)                         |       State        |
+  // |------------------------------------------------------------------------------|--------------------|
+  // | thread:54      |     epoch:2     | unused:1 | age:4 | biased_lock:1 | lock:01|       偏向锁       |
+  // |------------------------------------------------------------------------------|--------------------|
 
   bind(try_rebias);
   // 重偏向逻辑

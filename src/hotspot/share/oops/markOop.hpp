@@ -291,7 +291,7 @@ class markOopDesc: public oopDesc {
     return (BasicLock*) value();
   }
   bool has_monitor() const {
-    return ((value() & monitor_value) != 0);
+    return ((value() & monitor_value) != 0);  // 其实就是判断一下mark word最后两位是否为10
   }
   ObjectMonitor* monitor() const {
     assert(has_monitor(), "check");

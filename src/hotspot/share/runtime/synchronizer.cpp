@@ -341,17 +341,17 @@ void ObjectSynchronizer::slow_enter(Handle obj, BasicLock* lock, TRAPS) {
   markOop mark = obj->mark();
   assert(!mark->has_bias_pattern(), "should not see bias pattern here");
 
-  if (mark->is_neutral()) { //如果是无锁状态, markword的biase_lock:0，lock:01. 在revoke_and_rebias(...)发生了撤销偏向后,会处于该状态
+  if (mark->is_neutral()) { //如果是无锁状态, markword的biase_lock:0，lock:01.
     // 当前对象mark word保存到Displaced Mark Word
     // Anticipate successful CAS -- the ST of the displaced mark must
     // be visible <= the ST performed by the CAS.
     lock->set_displaced_header(mark);
     if (mark == obj()->cas_set_mark((markOop) lock, mark)) {  // 然后通过CAS设置对象头的整个mark word为[Lock Record中displaced header的地址],
-                                                              // 由于有内存字节对齐,这个地址的最低两位肯定为00,因此成功设置后mark word的锁标志位也成了00(类似轻量级锁状态,但是Displaced Mark Word锁标志为却是01?).
+                                                              // 由于有内存字节对齐,这个地址的最低两位肯定为00,因此成功设置后mark word的锁标志位也成了00(轻量级锁状态).
       TEVENT(slow_enter: release stacklock);
       return;   // case 1: CAS成功,流程结束.
     }
-    // case 2: CAS失败,继续执行inflate()
+    // case 2: 如果是轻量级锁重入
     // Fall through to inflate() ...
   } else if (mark->has_locker() &&
              THREAD->is_lock_owned((address)mark->locker())) {
@@ -363,6 +363,7 @@ void ObjectSynchronizer::slow_enter(Handle obj, BasicLock* lock, TRAPS) {
     return;
   }
 
+  // 走到这一步说明已经是存在多个线程竞争锁了,
   // 这时候需要膨胀为重量级锁，膨胀前，设置Displaced Mark Word为一个特殊值，
   // 代表该锁正在用一个重量级锁的monitor.
   // The object header will never be displaced to this lock,
@@ -1106,6 +1107,11 @@ void ObjectSynchronizer::verifyInUse(Thread *Self) {
   assert(free_tally == Self->omFreeCount, "free count off");
 }
 
+// 分配一个ObjectMonitor对象(以下简称monitor)，
+// 在omAlloc方法中会先从线程私有的monitor集合omFreeList中分配对象，
+// 如果omFreeList中已经没有monitor对象，
+// 则从JVM全局的gFreeList中分配一批monitor到omFreeList中.
+// 这样可以减少全局空闲列表的锁竞争.
 ObjectMonitor* ObjectSynchronizer::omAlloc(Thread * Self) {
   // A large MAXPRIVATE value reduces both list lock contention
   // and list coherency traffic, but also tends to increase the
@@ -1393,6 +1399,11 @@ ObjectMonitor* ObjectSynchronizer::inflate_helper(oop obj) {
                                      inflate_cause_vm_internal);
 }
 
+// inflate中是一个for循环，主要是为了处理多线程同时调用inflate的情况。然后会根据锁对象的状态进行不同的处理：
+//1.已经是重量级状态，说明膨胀已经完成，直接返回
+//2.如果是轻量级锁则需要进行膨胀操作
+//3.如果是膨胀中状态，则进行忙等待
+//4.如果是无锁状态则需要进行膨胀操作
 ObjectMonitor* ObjectSynchronizer::inflate(Thread * Self,
                                                      oop object,
                                                      const InflateCause cause) {
@@ -1408,7 +1419,7 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread * Self,
     const markOop mark = object->mark();
     assert(!mark->has_bias_pattern(), "invariant");
 
-    // mark是以下状态中的一种：
+    // Mark Word可能是以下状态中的一种：
     // *  Inflated（重量级锁状态）     - 直接返回
     // *  Stack-locked（轻量级锁状态） - 膨胀
     // *  INFLATING（膨胀中）    - 忙等待直到膨胀完成
@@ -1432,7 +1443,7 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread * Self,
       return inf;
     }
 
-    // case 2:正在膨胀中，说明另一个线程正在进行锁膨胀,进行自旋重试.
+    // case 2:正在膨胀中，说明另一个线程正在从轻量级锁膨胀为重量级锁,所以我们需要进行自旋重试.
     // CASE: inflation in progress - inflating over a stack-lock.
     // Some other thread is converting from stack-locked to inflated.
     // Only that thread can complete inflation -- other threads must wait.
@@ -1446,7 +1457,11 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread * Self,
       continue; // continue重试
     }
 
-    // case 3: 当前处于轻量级锁状态.
+    // case 3: 当前处于轻量级锁状态(可能是当前或其它线程持有).
+    // 为了减少锁升级的时间,我们做了些优化: 先分配ObjectMonitor对象,再设置INFLATING状态到Mark Word.
+    // 我们还使用了线程私有的空闲objectmonitor列表,线程可以在需要时从全局空闲列表中移动多个objectmonitor到其私有列表,
+    // 这样可以减少全局空闲列表的锁竞争.通过这些线程本地的空闲列表,我们就可以自由地在CAS设置INFLATING状态前或后
+    // 调用omAlloc()方法获得ObjectMonitor对象.
     // CASE: stack-locked
     // Could be stack-locked either by this thread or by some other thread.
     //
@@ -1479,17 +1494,22 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread * Self,
 
       // 将锁对象的mark word设置为INFLATING (0)状态
       markOop cmp = object->cas_set_mark(markOopDesc::INFLATING(), mark);
-      if (cmp != mark) {
+      if (cmp != mark) {  // 如果CAS设置失败
         omRelease(Self, m, true);
-        continue;       // Interference -- just retry
+        continue;       // Interference -- just retry   // 就重试
       }
 
+      // 运行到这里,我们已经成功设置Mark Word为INFLATING (0),
+      // 这是唯一一种Mark Word为0的情况.
       // We've successfully installed INFLATING (0) into the mark-word.
       // This is the only case where 0 will appear in a mark-word.
       // Only the singular thread that successfully swings the mark-word
       // to 0 can perform (or more precisely, complete) inflation.
       //
       // 至于为什么轻量级锁需要一个膨胀中（INFLATING）状态?
+      // 简而言之就是防止这个函数进行锁升级(成重量级锁)的时候,原锁拥有线程进行了锁释放,
+      // 导致Mark Word的hashCode部分被改变的情况.所以需要一个中间态INFLATING来表示"忙"标志,
+      // 让锁释放流程先自旋等待"忙"标志取消.
       // Why do we CAS a 0 into the mark-word instead of just CASing the
       // mark-word from the stack-locked value directly to the new inflated state?
       // Consider what happens when a thread unlocks a stack-locked object.
@@ -1515,12 +1535,12 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread * Self,
       // The owner can't die or unwind past the lock while our INFLATING
       // object is in the mark.  Furthermore the owner can't complete
       // an unlock on the object, either.
-      // 栈中的displaced mark word
+      // 获取栈中的displaced mark word,
       markOop dmw = mark->displaced_mark_helper();
       assert(dmw->is_neutral(), "invariant");
 
       // Setup monitor fields to proper values -- prepare the monitor
-      // 设置monitor的字段
+      // 然后设置到monitor的_header字段
       m->set_header(dmw);
 
       // Optimization: if the mark->locker stack address is associated
@@ -1528,15 +1548,16 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread * Self,
       // Note that a thread can inflate an object
       // that it has stack-locked -- as might happen in wait() -- directly
       // with CAS.  That is, we can avoid the xchg-NULL .... ST idiom.
-      // owner为Lock Record
+      // 设置monitor的owner字段为Lock Record
       m->set_owner(mark->locker());
+      // 设置monitor的object字段指向被锁对象
       m->set_object(object);
       // TODO-FIXME: assert BasicLock->dhw != 0.
 
       // Must preserve store ordering. The monitor state must
       // be stable at the time of publishing the monitor address.
       guarantee(object->mark() == markOopDesc::INFLATING(), "invariant");
-      // 将锁对象头设置为重量级锁状态
+      // 将锁对象头设置为重量级锁状态,且指向前面分配的monitor对象.
       object->release_set_mark(markOopDesc::encode(m));
 
       // Hopefully the performance counters are allocated on distinct cache lines
@@ -1554,7 +1575,7 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread * Self,
       if (event.should_commit()) {
         post_monitor_inflate_event(&event, object, cause);
       }
-      return m;
+      return m;   // 完成锁膨胀为重量级锁的流程了.
     }
 
     // case 4: 对象处于无锁状态(中立).
@@ -1573,14 +1594,14 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread * Self,
     ObjectMonitor * m = omAlloc(Self);
     // prepare m for installation - set monitor to initial state
     m->Recycle();
-    m->set_header(mark);
+    m->set_header(mark);      // 设置monitor的header字段为对象mark word
     m->set_owner(NULL); // owner为NULL
-    m->set_object(object);
+    m->set_object(object);    // obj字段为被锁对象
     m->_recursions   = 0;
     m->_Responsible  = NULL;
     m->_SpinDuration = ObjectMonitor::Knob_SpinLimit;       // consider: keep metastats by type/class
 
-    // 用CAS替换对象头的mark word为重量级锁状态
+    // 用CAS替换对象头的mark word为重量级锁状态,并指向前面分配的monitor对象
     if (object->cas_set_mark(markOopDesc::encode(m), mark) != mark) {
       // 不成功说明有另外一个线程在执行inflate，释放monitor对象,然后continue重试.
       m->set_object(NULL);
@@ -1609,7 +1630,7 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread * Self,
     if (event.should_commit()) {
       post_monitor_inflate_event(&event, object, cause);
     }
-    return m;
+    return m;   // 完成锁膨胀为重量级锁的流程了.
   }
 }
 

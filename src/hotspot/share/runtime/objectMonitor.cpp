@@ -260,6 +260,9 @@ void ObjectMonitor::operator delete[] (void *p) {
 }
 
 // 膨胀完成之后，会调用enter方法.
+// 1.如果当前是无锁状态、锁重入、当前线程是之前持有轻量级锁的线程则进行简单操作后返回.
+// 2.先自旋尝试获得锁，这样做的目的是为了减少执行操作系统同步操作带来的开销.
+// 3.调用EnterI方法获得锁或阻塞.
 // -----------------------------------------------------------------------------
 // Enter support
 
@@ -268,7 +271,7 @@ void ObjectMonitor::enter(TRAPS) {
   // and to reduce RTS->RTO cache line upgrades on SPARC and IA32 processors.
   Thread * const Self = THREAD;
 
-  // owner为null代表无锁状态，如果能CAS设置成功，则当前线程直接获得锁
+  // owner为null代表是无锁状态，如果能CAS设置_owner为当前线程成功，则当前线程直接获得锁.
   void * cur = Atomic::cmpxchg(Self, &_owner, (void*)NULL);
   if (cur == NULL) {
     // Either ASSERT _recursions == 0 or explicitly set _recursions = 0.
@@ -277,7 +280,7 @@ void ObjectMonitor::enter(TRAPS) {
     return;
   }
 
-  // 如果是重入的情况
+  // 如果是重入的情况,重入计数自增后返回.
   if (cur == Self) {
     // TODO-FIXME: check for integer overflow!  BUGID 6557169.
     _recursions++;
@@ -360,7 +363,7 @@ void ObjectMonitor::enter(TRAPS) {
       // cleared by handle_special_suspend_equivalent_condition()
       // or java_suspend_self()
 
-      // 在该方法中调用系统同步操作(进入队列将当前线程阻塞)
+      // 重点,在该方法中调用系统同步操作(进入队列将当前线程阻塞)
       EnterI(THREAD);
 
       if (!ExitSuspendEquivalent(jt)) break;
@@ -452,13 +455,33 @@ int ObjectMonitor::TryLock(Thread * Self) {
 
 #define MAX_RECHECK_INTERVAL 1000
 
-// 进入队列将当前线程阻塞
+// 进入队列将当前线程阻塞.
+// 大致原理:
+// 一个ObjectMonitor对象包括这么几个关键字段：
+// cxq（ContentionList），EntryList ，WaitSet和owner.
+// 其中cxq ，EntryList ，WaitSet都是由ObjectWaiter的链表结构，owner指向持有锁的线程。
+// 当一个线程尝试获得锁时，如果该锁已经被占用，则会将该线程封装成一个ObjectWaiter对象,
+// 插入到cxq的队列的队首，然后调用park函数挂起当前线程。
+// 在Linux系统上，park函数底层调用的是gclib库的pthread_cond_wait，
+// JDK的ReentrantLock底层也是用该方法挂起线程的,
+// 关于Linux同步更多细节可以看:
+// [关于同步的一点思考](https://github.com/farmerjohngit/myblog/issues/7)
+// [linux内核级同步机制--futex](https://github.com/farmerjohngit/myblog/issues/8)
+// 当线程释放锁时，会从cxq或EntryList中挑选一个线程唤醒，
+// 被选中的线程叫做Heir presumptive(假定继承人)，假定继承人被唤醒后会尝试获得锁，
+// 但synchronized是非公平的，所以假定继承人不一定能获得锁（这也是它叫"假定"继承人的原因）。
+// 如果线程获得锁后调用Object#wait方法，则会将线程加入到WaitSet中，
+// 当被Object#notify唤醒后，会将线程从WaitSet移动到cxq或EntryList中去。
+// 需要注意的是，当调用一个锁对象的wait或notify方法时，如当前锁的状态是偏向锁或轻量级锁
+// 则会先膨胀成重量级锁。
+// synchronized的monitor锁机制和JDK的ReentrantLock与Condition是很相似的，
+// ReentrantLock也有一个存放等待获取锁线程的链表，Condition也有一个类似WaitSet的集合用来存放调用了await的线程。
 void ObjectMonitor::EnterI(TRAPS) {
   Thread * const Self = THREAD;
   assert(Self->is_Java_thread(), "invariant");
   assert  (((JavaThread *) Self)->thread_state() == _thread_blocked, "invariant");
 
-  // 先执行TryLock
+  // 先执行TryLock尝试获得锁
   // Try the lock - TATAS
   if (TryLock (Self) > 0) {
     assert(_succ != Self, "invariant");
@@ -512,10 +535,10 @@ void ObjectMonitor::EnterI(TRAPS) {
   node._prev   = (ObjectWaiter *) 0xBAD;
   node.TState  = ObjectWaiter::TS_CXQ;
 
-  // 入队.
+  // 自旋入队.
   // 正如注释中说的那样，我们是要将当前节点放到 CXQ 队列的头部，
-  // 将节点的 next 指针通过 cas 操作指向 _cxq 指针就完成了入队操作。
-  // 如果入队成功，则退出当前循环，否则再次尝试 lock，因为可能这个时候会成功。
+  // 将链表的头节点_cxq指针通过 cas 操作指向 新建的节点node 指针就完成了入队操作。(头插法)
+  // 如果入队成功，则退出当前循环，否则再次尝试获取锁，因为可能这个时候会成功。
   // Push "Self" onto the front of the _cxq.
   // Once on cxq/EntryList, Self stays on-queue until it acquires the lock.
   // Note that spinning tends to reduce the rate at which threads
@@ -558,6 +581,11 @@ void ObjectMonitor::EnterI(TRAPS) {
   // timer scalability issues we see on some platforms as we'd only have one thread
   // -- the checker -- parked on a timer.
 
+  // SyncFlags默认为0.
+  // 当竞争发生时，选取一个线程作为_Responsible,
+  // 这个_Responsible线程在下面park时,
+  // 调用的是带时间参数的park,防止出现"饥饿"现象.
+  // 如果没有其他等待的线程，则将_Responsible设置为自己.
   if ((SyncFlags & 16) == 0 && nxt == NULL && _EntryList == NULL) {
     // Try to assume the role of responsible thread for the monitor.
     // CONSIDER:  ST vs CAS vs { if (Responsible==null) Responsible=Self }
@@ -583,6 +611,7 @@ void ObjectMonitor::EnterI(TRAPS) {
   // 1. 尝试获取锁
   // 2. park 当前线程
   // 3. 再次尝试获取锁
+  // 也就是在成功获取到锁前,线程可能经过多次park与unpark.
   for (;;) {
 
     if (TryLock(Self) > 0) break;
@@ -594,6 +623,8 @@ void ObjectMonitor::EnterI(TRAPS) {
 
     // park self
     if (_Responsible == Self || (SyncFlags & 1)) {
+      // 当前线程是_Responsible时，调用带时间参数的park
+      // 防止出现"饥饿"现象
       TEVENT(Inflated enter - park TIMED);
       Self->_ParkEvent->park((jlong) recheckInterval);
       // Increase the recheckInterval, but clamp the value.
@@ -602,6 +633,7 @@ void ObjectMonitor::EnterI(TRAPS) {
         recheckInterval = MAX_RECHECK_INTERVAL;
       }
     } else {
+      //否则直接调用park挂起当前线程
       TEVENT(Inflated enter - park UNTIMED);
       Self->_ParkEvent->park();
     }
@@ -637,12 +669,15 @@ void ObjectMonitor::EnterI(TRAPS) {
       Self->_ParkEvent->reset();
       OrderAccess::fence();
     }
+    // 在释放锁时，_succ会被设置为EntryList或_cxq中的一个线程.
+    // 其含义是Heir presumptive，也就是我们上面注释中说的假定继承人.
     if (_succ == Self) _succ = NULL;
 
     // Invariant: after clearing _succ a thread *must* retry _owner before parking.
     OrderAccess::fence();
   }
 
+  // 走到这里说明已经获得锁了
   // Egress :
   // Self has acquired the lock -- Unlink Self from the cxq or EntryList.
   // Normally we'll find Self on the EntryList .
@@ -657,6 +692,7 @@ void ObjectMonitor::EnterI(TRAPS) {
   //   guarantee (((oop)(object()))->mark() == markOopDesc::encode(this), "invariant") ;
   // but as we're at a safepoint that's not safe.
 
+  // 将当前线程的node从cxq或EntryList中移除
   UnlinkAfterAcquire(Self, &node);
   if (_succ == Self) _succ = NULL;
 
@@ -937,7 +973,9 @@ void ObjectMonitor::UnlinkAfterAcquire(Thread *Self, ObjectWaiter *SelfNode) {
 
 void ObjectMonitor::exit(bool not_suspended, TRAPS) {
   Thread * const Self = THREAD;
+  // 如果_owner不是当前线程
   if (THREAD != _owner) {
+    // 当前线程是之前持有轻量级锁的线程。由轻量级锁膨胀后还没调用过enter方法，_owner会是指向Lock Record的指针。
     if (THREAD->is_lock_owned((address) _owner)) {
       // Transmute _owner from a BasicLock pointer to a Thread address.
       // We don't need to hold _mutex for this transition.
@@ -947,6 +985,7 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
       _owner = THREAD;
       _recursions = 0;
     } else {
+      // 异常情况:当前不是持有锁的线程
       // Apparent unbalanced locking ...
       // Naively we'd like to throw IllegalMonitorStateException.
       // As a practical matter we can neither allocate nor throw an
@@ -962,12 +1001,14 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
     }
   }
 
+  // 重入计数器还不为0，则计数器-1后返回
   if (_recursions != 0) {
     _recursions--;        // this is simple recursive enter
     TEVENT(Inflated exit - recursive);
     return;
   }
 
+  // _Responsible设置为null
   // Invariant: after setting Responsible=null an thread must execute
   // a MEMBAR or other serializing instruction before fetching EntryList|cxq.
   if ((SyncFlags & 4) == 0) {
@@ -985,6 +1026,7 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
   for (;;) {
     assert(THREAD == _owner, "invariant");
 
+    // Knob_ExitPolicy默认为0
     if (Knob_ExitPolicy == 0) {
       // release semantics: prior loads and stores from within the critical section
       // must not float (reorder) past the following store that drops the lock.
@@ -998,8 +1040,13 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
       // in massive wasteful coherency traffic on classic SMP systems.
       // Instead, I use release_store(), which is implemented as just a simple
       // ST on x64, x86 and SPARC.
+      // 先设置owner为null，即释放锁.
+      // 这时如果有其他线程进入同步块则能获得锁,
+      // 这是一个非公平锁的优化.
       OrderAccess::release_store(&_owner, (void*)NULL);   // drop the lock
       OrderAccess::storeload();                        // See if we need to wake a successor
+      // 如果没有等待的线程或已经有假定继承人,直接返回,因为不需要唤醒其他线程.
+      // 或者如果说_succ不为null，代表当前已经有个"醒着的"继承人线程，那当前线程不需要唤醒任何线程.
       if ((intptr_t(_EntryList)|intptr_t(_cxq)) == 0 || _succ != NULL) {
         TEVENT(Inflated exit - simple egress);
         return;
@@ -1043,6 +1090,8 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
       // to reacquire the lock the responsibility for ensuring succession
       // falls to the new owner.
       //
+      // 因为之后要操作cxq和EntryList队列以及唤醒线程,
+      // 所以需要重新获得锁，即设置_owner为当前线程.
       if (!Atomic::replace_if_null(THREAD, &_owner)) {
         return;
       }
@@ -1081,9 +1130,20 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
     guarantee(_owner == THREAD, "invariant");
 
     ObjectWaiter * w = NULL;
+    // 根据QMode的不同会有不同的唤醒策略，默认为0.
+    // QMode = 2且cxq非空：取cxq队列队首的ObjectWaiter对象，
+    //          调用ExitEpilog方法，该方法会唤醒ObjectWaiter对象的线程，然后立即返回，后面的代码不会执行了；
+    // QMode = 3且cxq非空：把cxq队列插入到EntryList的尾部；
+    // QMode = 4且cxq非空：把cxq队列插入到EntryList的头部；
+    // QMode = 0：暂时什么都不做，继续往下看.
+    //
+    // 只有QMode=2的时候会提前返回，等于0、3、4的时候都会继续往下执行：
+    // 1.如果EntryList的首元素非空，就取出来调用ExitEpilog方法，该方法会唤醒ObjectWaiter对象的线程，然后立即返回；
+    // 2.如果EntryList的首元素为空，就将cxq的所有元素放入到EntryList中，然后再从EntryList中取出来队首元素执行ExitEpilog方法，然后立即返回.
     int QMode = Knob_QMode;
 
     if (QMode == 2 && _cxq != NULL) {
+      // QMode == 2 : cxq中的线程有更高优先级，直接唤醒cxq的队首线程
       // QMode == 2 : cxq has precedence over EntryList.
       // Try to directly wake a successor from the cxq.
       // If successful, the successor will need to unlink itself from cxq.
@@ -1095,6 +1155,7 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
     }
 
     if (QMode == 3 && _cxq != NULL) {
+      // QMode == 3 : 将cxq中的元素插入到EntryList的末尾
       // Aggressively drain cxq into EntryList at the first opportunity.
       // This policy ensure that recently-run threads live at the head of EntryList.
       // Drain _cxq into EntryList - bulk transfer.
@@ -1135,6 +1196,7 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
     }
 
     if (QMode == 4 && _cxq != NULL) {
+      // QMode == 4 : 将cxq插入到EntryList的队首
       // Aggressively drain cxq into EntryList at the first opportunity.
       // This policy ensure that recently-run threads live at the head of EntryList.
 
@@ -1169,6 +1231,7 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
       // Fall thru into code that tries to wake a successor from EntryList
     }
 
+    // 如果EntryList不为空，则直接唤醒EntryList的队首元素
     w = _EntryList;
     if (w != NULL) {
       // I'd like to write: guarantee (w->_thread != Self).
@@ -1187,11 +1250,13 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
       return;
     }
 
+    // EntryList为null，则处理cxq中的元素
     // If we find that both _cxq and EntryList are null then just
     // re-run the exit protocol from the top.
     w = _cxq;
     if (w == NULL) continue;
 
+    // 因为之后要将cxq的元素移动到EntryList，所以这里将cxq字段设置为null
     // Drain _cxq into EntryList - bulk transfer.
     // First, detach _cxq.
     // The following loop is tantamount to: w = swap(&cxq, NULL)
@@ -1216,6 +1281,7 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
     // we have faster access to the tail.
 
     if (QMode == 1) {
+      // QMode == 1 : 将cxq中的元素转移到EntryList，并反转顺序
       // QMode == 1 : drain cxq to EntryList, reversing order
       // We also reverse the order of the list.
       ObjectWaiter * s = NULL;
@@ -1234,6 +1300,7 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
       assert(s != NULL, "invariant");
     } else {
       // QMode == 0 or QMode == 2
+      // 将cxq中的元素转移到EntryList
       _EntryList = w;
       ObjectWaiter * q = NULL;
       ObjectWaiter * p;
@@ -1248,11 +1315,13 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
     // In 1-0 mode we need: ST EntryList; MEMBAR #storestore; ST _owner = NULL
     // The MEMBAR is satisfied by the release_store() operation in ExitEpilog().
 
+    // _succ不为null，说明已经有个继承人了，所以不需要当前线程去唤醒，减少上下文切换的比率
     // See if we can abdicate to a spinner instead of waking a thread.
     // A primary goal of the implementation is to reduce the
     // context-switch rate.
     if (_succ != NULL) continue;
 
+    // 唤醒EntryList第一个元素
     w = _EntryList;
     if (w != NULL) {
       guarantee(w->TState == ObjectWaiter::TS_ENTER, "invariant");

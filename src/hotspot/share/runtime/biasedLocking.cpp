@@ -286,7 +286,7 @@ static BiasedLocking::Condition revoke_bias(oop obj, bool allow_rebias, bool is_
                                p2i((void *) mon_info->owner()),
                                p2i((void *) obj));
       // 需要锁膨胀，直接修改偏向线程栈中的所有与该对象相关的Lock Record。
-      // 由于要处理锁重入的case，在这里暂时只将所有相关Lock Record的Displaced Mark Word设置为null，
+      // 由于要处理锁重入的case，在这里暂时只将所有相关Lock Record的Displaced Mark Word设置为0，
       // 第一个Lock Record(highest_lock)会在下面的代码中再处理
       // Assume recursive case and fix up highest lock later
       markOop mark = markOopDesc::encode((BasicLock*) NULL);
@@ -319,7 +319,7 @@ static BiasedLocking::Condition revoke_bias(oop obj, bool allow_rebias, bool is_
     } else {
       log_trace(biasedlocking)("  Revoked bias of currently-locked object");
     }
-    // 对正在被锁定的对象进行偏向锁撤销完成，只修改了mark word高位指向Lock Record,但并没有改变对象头的锁状态，而是回到fast_enter继续锁膨胀过程
+    // 对正在被锁定的对象进行偏向锁撤销完成，回到caller继续过程
   } else {
     //  如果上面的过程没找displaced_header，说明当前撤销偏向锁
     //  的对象目前没有被锁定，即已经不在同步块中了，
@@ -540,6 +540,9 @@ static BiasedLocking::Condition bulk_revoke_or_rebias_at_safepoint(oop o,
     }
   } // ThreadsListHandle is destroyed here.
 
+  // 批量撤销完成.
+  // 对于批量重偏向流程,
+  // 还需要将当前对象重偏向到当前线程.
   log_info(biasedlocking)("* Ending bulk revocation");
 
   BiasedLocking::Condition status_code = BiasedLocking::BIAS_REVOKED;
