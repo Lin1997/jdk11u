@@ -660,6 +660,15 @@ class SkipGCALot : public StackObj {
 #endif
 };
 
+// 如果提交任务的当前线程是普通Java用户线程,
+// 会将这个任务给VM operation队列,
+// 这样VM Thread会在所有的Java线程处于safepoint时,
+// 回调用提交的任务.
+// 该方法会阻塞直到VM Thread将本任务完成.
+// 关于VM Thread这里介绍下：在JVM中有个专门的VM Thread，
+// 该线程会源源不断的从VMOperationQueue中取出请求，比如GC请求.
+// 对于需要safepoint的操作（VM_Operationevaluate_at_safepoint返回true）
+// 必须要等到所有的Java线程进入到safepoint才开始执行.
 void VMThread::execute(VM_Operation* op) {
   Thread* t = Thread::current();
 
@@ -692,7 +701,7 @@ void VMThread::execute(VM_Operation* op) {
       ticket = t->vm_operation_ticket();
     }
 
-    // 添加到VM operation队列等待执行
+    // 添加到VM operation队列等待所有的Java线程处于safepoint时进行执行.
     // Add VM operation to list of waiting threads. We are guaranteed not to block while holding the
     // VMOperationQueue_lock, so we can block without a safepoint check. This allows vm operation requests
     // to be queued up during a safepoint synchronization.
@@ -712,6 +721,7 @@ void VMThread::execute(VM_Operation* op) {
     }
 
     if (!concurrent) {
+      // 阻塞直到VM Thread将本任务完成.
       // Wait for completion of request (non-concurrent)
       // Note: only a JavaThread triggers the safepoint check when locking
       MutexLocker mu(VMOperationRequest_lock);

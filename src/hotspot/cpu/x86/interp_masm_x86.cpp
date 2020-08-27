@@ -1157,6 +1157,10 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
   // 如果要直接使用重量级锁(-XX:+UseHeavyMonitors)，
   // 则直接进入InterpreterRuntime::monitorenter()执行
   if (UseHeavyMonitors) {
+    // (千万别忘了,我们现在是在为TemplateInterpreter初始化生成
+    // 实现字节码逻辑的汇编代码模板,
+    // 要通过call_VM生成"调用monitorenter方法的汇编代码模板"
+    // 而不是现在直接调用.)
     call_VM(noreg,
             CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorenter),
             lock_reg);
@@ -1274,7 +1278,9 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
   }
 }
 
-
+// 偏向锁的释放很简单，只要将对应Lock Record释放就好了，
+// 而轻量级锁则需要将Displaced Mark Word替换到对象头的mark word中.
+// 如果CAS失败或者是重量级锁则进入到InterpreterRuntime::monitorexit方法中.
 // Unlocks an object. Used in monitorexit bytecode and
 // remove_activation.  Throws an IllegalMonitorException if object is
 // not locked by current thread.
@@ -1291,7 +1297,13 @@ void InterpreterMacroAssembler::unlock_object(Register lock_reg) {
   assert(lock_reg == LP64_ONLY(c_rarg1) NOT_LP64(rdx),
          "The argument is only for looks. It must be c_rarg1");
 
+  // 如果要直接使用重量级锁(-XX:+UseHeavyMonitors)，
+  // 则直接进入InterpreterRuntime::monitorexit()执行
   if (UseHeavyMonitors) {
+    // (千万别忘了,我们现在是在为TemplateInterpreter初始化生成
+    // 实现字节码逻辑的汇编代码模板,
+    // 要通过call_VM生成"调用monitorexit方法的汇编代码模板"
+    // 而不是现在直接调用.)
     call_VM(noreg,
             CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorexit),
             lock_reg);
@@ -1304,40 +1316,59 @@ void InterpreterMacroAssembler::unlock_object(Register lock_reg) {
 
     save_bcp(); // Save in case of exception
 
+    // 将Lock Record的Displaced Mark Word保存到swap_reg
     // Convert from BasicObjectLock structure to object and BasicLock
     // structure Store the BasicLock address into %rax
     lea(swap_reg, Address(lock_reg, BasicObjectLock::lock_offset_in_bytes()));
 
+    // 将Lock Record的obj成员(被锁对象)保存到obj_reg
     // Load oop into obj_reg(%c_rarg3)
     movptr(obj_reg, Address(lock_reg, BasicObjectLock::obj_offset_in_bytes()));
 
+    // 释放Lock Record,即将obj成员置NULL
     // Free entry
     movptr(Address(lock_reg, BasicObjectLock::obj_offset_in_bytes()), (int32_t)NULL_WORD);
 
+    // case 1:如果虚拟机参数允许使用偏向锁(-XX:+/-UseBiasedLocking)
+    // 那么进入biased_locking_exit(...)中
+    // 执行偏向锁解锁逻辑.
     if (UseBiasedLocking) {
-      biased_locking_exit(obj_reg, header_reg, done);
+      // obj_reg :被锁对象的指针
+      // done :标志着获取锁成功的Label,传入这个Label使得在函数中，可以根据情况回跳到这两处
+      biased_locking_exit(obj_reg, header_reg, done); // 如果对象头是可偏向状态,直接跳转到done
     }
 
+    // case 2:如果没有使用偏向锁,则执行下面的轻量级锁/重量级锁解锁逻辑
+
+    // 备份Displaced Mark Word到header_reg
     // Load the old header from BasicLock structure
     movptr(header_reg, Address(swap_reg,
                                BasicLock::displaced_header_offset_in_bytes()));
 
+    // case 2.1: header==NULL说明是重入生成的Lock Record,
     // Test for recursion
     testptr(header_reg, header_reg);
 
+    // 那无需处理这个Lock Record,跳到done,完成解锁.
     // zero for recursive case
     jcc(Assembler::zero, done);
 
+    // case 2.2: 运行到这说明不是锁重入的Lock Record,
+    // 通过CAS原子性将Displaced Mark Word设置回对象的Mark Word.
     // Atomic swap back the old header
     if (os::is_MP()) lock();
     cmpxchgptr(header_reg, Address(obj_reg, oopDesc::mark_offset_in_bytes()));
 
+    // 设置成功说明轻量级锁释放完毕,跳转到done
     // zero for simple unlock of a stack-lock case
     jcc(Assembler::zero, done);
 
+    // case 3: CAS失败或者是重量级锁则会走到这里:
     // Call the runtime routine for slow case.
+    // 先将obj还原回Lock Record
     movptr(Address(lock_reg, BasicObjectLock::obj_offset_in_bytes()),
          obj_reg); // restore obj
+    // 然后调用monitorexit方法.
     call_VM(noreg,
             CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorexit),
             lock_reg);

@@ -50,6 +50,11 @@ class BasicLock {
 // A BasicObjectLock associates a specific Java object with a BasicLock.
 // It is currently embedded in an interpreter frame.
 
+// 由于一些平台在栈的控制上有内存对齐的限制,
+// 所以实际的BasicObjectLock的实际分配空间可能会包括
+// 有一些对其填充的字,这些字将接在BasicObjectLock的后面.
+// 同时,在这些平台上,为了保证类成员变量BasicLock _lock也对齐,
+// 我们将这个BasicLock _lock变量放在类的起始地址.
 // Because some machines have alignment restrictions on the control stack,
 // the actual space allocated by the interpreter may include padding words
 // after the end of the BasicObjectLock.  Also, in order to guarantee

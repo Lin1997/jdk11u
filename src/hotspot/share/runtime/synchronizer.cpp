@@ -266,7 +266,7 @@ void ObjectSynchronizer::fast_enter(Handle obj, BasicLock* lock,
   if (UseBiasedLocking) { // 如果开启了JVM偏向锁
     if (!SafepointSynchronize::is_at_safepoint()) { // 如果当前线程是普通的Java线程
       BiasedLocking::Condition cond = BiasedLocking::revoke_and_rebias(obj, attempt_rebias, THREAD);  // 撤销或者重偏向
-      if (cond == BiasedLocking::BIAS_REVOKED_AND_REBIASED) { // case 1: revoke_and_rebias返回BIAS_REVOKED_AND_REBIASED,流程结束
+      if (cond == BiasedLocking::BIAS_REVOKED_AND_REBIASED) { // case 1: revoke_and_rebias中完成了重新偏向,流程结束
         return;
       }
     } else {  // 如果当前线程是JVM线程
@@ -341,16 +341,17 @@ void ObjectSynchronizer::slow_enter(Handle obj, BasicLock* lock, TRAPS) {
   markOop mark = obj->mark();
   assert(!mark->has_bias_pattern(), "should not see bias pattern here");
 
-  if (mark->is_neutral()) { //如果是无锁状态, markword的biase_lock:0，lock:01
-    // 通过CAS把mark保存到BasicLock对象的_displaced_header字段
+  if (mark->is_neutral()) { //如果是无锁状态, markword的biase_lock:0，lock:01. 在revoke_and_rebias(...)发生了撤销偏向后,会处于该状态
+    // 当前对象mark word保存到Displaced Mark Word
     // Anticipate successful CAS -- the ST of the displaced mark must
     // be visible <= the ST performed by the CAS.
     lock->set_displaced_header(mark);
-    if (mark == obj()->cas_set_mark((markOop) lock, mark)) {  // case 1: CAS成功,流程结束
+    if (mark == obj()->cas_set_mark((markOop) lock, mark)) {  // 然后通过CAS设置对象头的整个mark word为[Lock Record中displaced header的地址],
+                                                              // 由于有内存字节对齐,这个地址的最低两位肯定为00,因此成功设置后mark word的锁标志位也成了00(类似轻量级锁状态,但是Displaced Mark Word锁标志为却是01?).
       TEVENT(slow_enter: release stacklock);
-      return;
+      return;   // case 1: CAS成功,流程结束.
     }
-    // case 2: 继续执行inflate()
+    // case 2: CAS失败,继续执行inflate()
     // Fall through to inflate() ...
   } else if (mark->has_locker() &&
              THREAD->is_lock_owned((address)mark->locker())) {

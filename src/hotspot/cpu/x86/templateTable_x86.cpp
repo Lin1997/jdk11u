@@ -4356,6 +4356,7 @@ void TemplateTable::athrow() {
 // ...
 // [saved rbp    ] <--- rbp
 void TemplateTable::monitorenter() {
+  // 检查栈顶缓存的类型是否正确
   transition(atos, vtos);
 
   // 被锁对象(lockee)不能为空
@@ -4475,7 +4476,7 @@ void TemplateTable::monitorenter() {
   // 将被锁对象(lockee)存放至空闲BasicObjectLock(Lock Record)的obj字段中
   // store object
   __ movptr(Address(rmon, BasicObjectLock::obj_offset_in_bytes()), rax);
-  // 重要：跳转执行 lock_object 函数,传入的参数为前面的BasicObjectLock
+  // 重要：继续执行lock_object逻辑,模板的参数为前面的BasicObjectLock
   __ lock_object(rmon);
 
   // 获取锁的流程结束,接下来确保本次获取锁没有导致stack overflow
@@ -4490,8 +4491,10 @@ void TemplateTable::monitorenter() {
 }
 
 void TemplateTable::monitorexit() {
+  // 检查栈顶缓存的类型是否正确
   transition(atos, vtos);
 
+  // 被锁对象(lockee)不能为空
   // check for NULL object
   __ null_check(rax);
 
@@ -4506,6 +4509,8 @@ void TemplateTable::monitorexit() {
 
   Label found;
 
+  // 从顶至底(低地址向高地址)遍历monitor block(栈结构如TemplateTable::monitorenter()注释),
+  // 寻找被锁对象对应的Lock Record
   // find matching slot
   {
     Label entry, loop;
@@ -4516,15 +4521,20 @@ void TemplateTable::monitorexit() {
     __ jmpb(entry);
 
     __ bind(loop);
+    // 检查该Lock Record关联的是否该被锁对象
     // check if current entry is for same object
     __ cmpptr(rax, Address(rtop, BasicObjectLock::obj_offset_in_bytes()));
+    // 是的话停止搜索,转跳到found Label
     // if same object then stop searching
     __ jcc(Assembler::equal, found);
+    // 否则继续检查下一个Lock Record
     // otherwise advance to next entry
     __ addptr(rtop, entry_size);
     __ bind(entry);
+    // 检查指针是否到monitor block底了
     // check if bottom reached
     __ cmpptr(rtop, rbot);
+    // 没到底就跳转回loop标签，继续循环
     // if not at bottom then check this entry
     __ jcc(Assembler::notEqual, loop);
   }
@@ -4534,10 +4544,16 @@ void TemplateTable::monitorexit() {
                    InterpreterRuntime::throw_illegal_monitor_state_exception));
   __ should_not_reach_here();
 
+  // 运行到这里,说明找到了被锁对象对应的Lock Record,
+  // 存放在了rtop里.
+  // 同时,被锁对象依旧存放在rax中.
   // call run-time routine
   __ bind(found);
+  // 将被锁对象压进栈里保存
   __ push_ptr(rax); // make sure object is on stack (contract with oopMaps)
+  // 重要! 执行解锁逻辑
   __ unlock_object(rtop);
+  // 完成了解锁,将被锁对象弹出.
   __ pop_ptr(rax); // discard object
 }
 
