@@ -1175,13 +1175,11 @@ int MacroAssembler::biased_locking_enter(Register lock_reg,
     null_check_offset = offset();
   }
   // 通过被锁对象的对象头的klass指针，取出klass的prototype_header，并存至tmp_reg
-  // 它是该'类型'的'Mark Word'
-  // 初始时类的prototype_header为偏向锁态，即后三位为101，一旦发生了bulk_revoke,那么就会设为无锁态，即001.
-  // 作用: 每次类发生bulk_rebais时（类的所有对象重设偏向锁,具体实现在bulk_revoke_or_rebias_at_safepoint(...)中）
-  // 类prototype_header中的epoch就会+1，这样原对象的锁拥有线程就过期不再有效.
-  // 此外,当epoch达到一个阈值时,就会发生bulk_revoke(批量撤销)，
-  // 撤销该类每个对象的偏向锁，这样该类的所有对象以后都不能使用偏向锁了
-  // 其实也就是虚拟机认为该对象不适合偏向锁
+  // 它是该'类型'的'Mark Word'.
+  // 初始时类的prototype_header为偏向锁态，即后三位为101，一旦发生了bulk_revoke(批量撤销),那么就会设为无锁态，即001.
+  // 每次发生revoke时,对应class的revoke计数器会自增,当达到BiasedLockingBulkRevokeThreshold阈值时执行bulk revoke,
+  // 撤销该类每个对象的偏向锁，且将该类的prototype_header置为无锁态(001),即所有对象以后都不能使用偏向锁了,
+  // 其实也就是虚拟机认为该对象不适合偏向锁.详情见:update_heuristics(...).
   load_prototype_header(tmp_reg, obj_reg);
 #ifdef _LP64
   // 构造一个新的markOop:
@@ -1304,9 +1302,12 @@ int MacroAssembler::biased_locking_enter(Register lock_reg,
 
   bind(try_rebias);
   // 重偏向逻辑
-  // 运行到这里，我们知道epoch已经过期，意味着当前的偏向锁拥有者（如果有）是无效的
-  // 说明发生了批量重偏向(实现在bulk_revoke_or_rebias_at_safepoint),
-  // 因此可以直接通过CAS操作获取偏向锁和修正epoch（这是唯一一个我们能在非匿名偏向时更改锁拥有线程的情况）
+  // 运行到这里，我们知道epoch已经过期，意味着当前的偏向锁拥有者（如果有）是无效的,
+  // 说明之前发生了bulk_rebias(批量重偏向,实现在bulk_revoke_or_rebias_at_safepoint).
+  // 类prototype_header中的epoch就会+1，这样那些之前创建的且还处于可偏向状态但发生bulk_rebais时不在同步块里执行的对象,
+  // 在发现自己epoch与类不同时就可以重新偏向而不是进行锁升级.
+  //
+  // 即现在可以直接通过CAS操作获取偏向锁和修正epoch（这是唯一一个我们能在非匿名偏向时更改锁拥有线程的情况）.
   // At this point we know the epoch has expired, meaning that the
   // current "bias owner", if any, is actually invalid. Under these
   // circumstances _only_, we are allowed to use the current header's

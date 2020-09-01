@@ -301,7 +301,7 @@ static BiasedLocking::Condition revoke_bias(oop obj, bool allow_rebias, bool is_
   }
   //  如果上面的过程找到了displaced_header，则highest_lock不为空
   //  说明当前撤销偏向的对象正在被偏向头里的线程锁定，即还在同步块中，
-  //  进入下面分支，对正在被锁定的对象进行偏向锁撤销
+  //  进入下面分支，对正在被锁定的对象进行偏向锁撤销并锁升级
   if (highest_lock != NULL) {
     // Fix up highest lock to contain displaced header and point
     // object at it
@@ -310,7 +310,8 @@ static BiasedLocking::Condition revoke_bias(oop obj, bool allow_rebias, bool is_
     // Reset object header to point to displaced mark.
     // Must release storing the lock address for platforms without TSO
     // ordering (e.g. ppc).
-    // 然后使对象的mark word高位指向这个Lock Record
+    // 然后使对象的mark word高位指向这个Lock Record地址,
+    // 由于有内存字节对齐,这个地址的最低两位肯定为00,因此成功设置后mark word的锁标志位也成了00(轻量级锁状态).
     obj->release_set_mark(markOopDesc::encode(highest_lock));
     assert(!obj->mark()->has_bias_pattern(), "illegal mark state: stack lock used bias bit");
     // Log at "info" level if not bulk, else "trace" level
@@ -319,7 +320,7 @@ static BiasedLocking::Condition revoke_bias(oop obj, bool allow_rebias, bool is_
     } else {
       log_trace(biasedlocking)("  Revoked bias of currently-locked object");
     }
-    // 对正在被锁定的对象进行偏向锁撤销完成，回到caller继续过程
+    // 原偏向头里的线程拥有的偏向锁升级成了轻量级锁,接下来回到caller继续处理当前线程的获取锁流程
   } else {
     //  如果上面的过程没找displaced_header，说明当前撤销偏向锁
     //  的对象目前没有被锁定，即已经不在同步块中了，
@@ -364,11 +365,10 @@ enum HeuristicsResult {
 // 启发式的方式决定要做哪种操作.
 //
 // 每个类型class都有一个prototype_header，它是该'类型'的'Mark Word'
-// 初始时类的prototype_header为偏向锁态，即后三位为101，
-// 一旦发生了bulk_revoke,那么就会设为无锁态，即001.
+// 初始时类的prototype_header为偏向锁态，即后三位为101，一旦发生了bulk_revoke(批量撤销),那么就会设为无锁态，即001.
 // 每次发生revoke时,会调用本函数. 在函数中会对对应class的revoke计数器会自增,
-// 当达到bulk_revoke(批量撤销)阈值则返回HR_BULK_REVOKE，calller会执行bulk revoke;
-// 当达到bulk_rebais(批量重偏向)阈值则返回HR_BULK_REBIAS，calller会执行bulk rebias(如果允许重偏向).
+// 当达到BiasedLockingBulkRevokeThreshold阈值则返回HR_BULK_REVOKE，calller会执行bulk revoke;
+// 当达到BiasedLockingBulkRebiasThreshold阈值则返回HR_BULK_REBIAS，calller会执行bulk rebias(批量重偏向,如果允许重偏向).
 static HeuristicsResult update_heuristics(oop o, bool allow_rebias) {
   markOop mark = o->mark();
   if (!mark->has_bias_pattern()) {
@@ -474,7 +474,7 @@ static BiasedLocking::Condition bulk_revoke_or_rebias_at_safepoint(oop o,
         // 备份自增前类中的的epoch
         int prev_epoch = klass->prototype_header()->bias_epoch();
         // 类中的epoch自增,
-        // 之后当该类已存在的实例获得锁时，就会尝试重偏向，
+        // 之后当该类已存在的处于可偏向状态的实例获得锁时，就会尝试重偏向，
         // 相关逻辑在偏向锁获取实现: MacroAssembler::biased_locking_enter中.
         klass->set_prototype_header(klass->prototype_header()->incr_bias_epoch());
         int cur_epoch = klass->prototype_header()->bias_epoch();
@@ -517,8 +517,8 @@ static BiasedLocking::Condition bulk_revoke_or_rebias_at_safepoint(oop o,
       // to be revoked.
       klass->set_prototype_header(markOopDesc::prototype());
 
-      // 处理当前正在被使用的锁对象.
-      // 通过遍历所有存活线程的栈,找到所有正在使用的偏向锁对象,然后撤销偏向锁.
+      // 处理当前正在被锁的对象.
+      // 通过遍历所有存活线程的栈,找到所有正在使用的偏向锁对象,然后撤销偏向锁并进行锁升级.
       // Now walk all threads' stacks and forcibly revoke the biases of
       // any locked and biased objects of this data type we encounter.
       for (; JavaThread *thr = jtiwh.next(); ) {

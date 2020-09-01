@@ -1196,7 +1196,7 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
       biased_locking_enter(lock_reg, obj_reg, swap_reg, tmp_reg, false, done, &slow_case);
     }
 
-    // 获取偏向锁失败,则执行轻量级锁获取逻辑.
+    // 不是可偏向状态,则执行轻量级锁获取逻辑.
 
     // Load immediate 1 into swap_reg %rax
     movl(swap_reg, (int32_t)1);

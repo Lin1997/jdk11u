@@ -492,7 +492,7 @@ void ObjectMonitor::EnterI(TRAPS) {
 
   DeferredInitialize();
 
-  // 在将自己入队钱再次重试,
+  // 在将自己入队前再次重试,
   // 其实是为了在入队阻塞线程之前的最后检查，防止线程无谓地进行状态切换。
   // 但是为什么执行两次？其实第下面的英文的注释已经说明了，这么做有一些微妙的亲和力影响？什么是亲和力？
   // 这是很多操作系统中都有的一种 CPU 执行调度逻辑，说的是，如果在过去一段时间内，
@@ -633,7 +633,7 @@ void ObjectMonitor::EnterI(TRAPS) {
         recheckInterval = MAX_RECHECK_INTERVAL;
       }
     } else {
-      //否则直接调用park挂起当前线程
+      // 否则直接调用park挂起当前线程
       TEVENT(Inflated enter - park UNTIMED);
       Self->_ParkEvent->park();
     }
@@ -1132,14 +1132,10 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
     ObjectWaiter * w = NULL;
     // 根据QMode的不同会有不同的唤醒策略，默认为0.
     // QMode = 2且cxq非空：取cxq队列队首的ObjectWaiter对象，
-    //          调用ExitEpilog方法，该方法会唤醒ObjectWaiter对象的线程，然后立即返回，后面的代码不会执行了；
+    //          调用ExitEpilog方法，该方法会唤醒该ObjectWaiter对象的线程，然后立即返回，后面的代码不会执行了；
     // QMode = 3且cxq非空：把cxq队列插入到EntryList的尾部；
     // QMode = 4且cxq非空：把cxq队列插入到EntryList的头部；
-    // QMode = 0：暂时什么都不做，继续往下看.
-    //
-    // 只有QMode=2的时候会提前返回，等于0、3、4的时候都会继续往下执行：
-    // 1.如果EntryList的首元素非空，就取出来调用ExitEpilog方法，该方法会唤醒ObjectWaiter对象的线程，然后立即返回；
-    // 2.如果EntryList的首元素为空，就将cxq的所有元素放入到EntryList中，然后再从EntryList中取出来队首元素执行ExitEpilog方法，然后立即返回.
+    // QMode = 0或1：暂时什么都不做，继续往下看.
     int QMode = Knob_QMode;
 
     if (QMode == 2 && _cxq != NULL) {
@@ -1231,6 +1227,11 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
       // Fall thru into code that tries to wake a successor from EntryList
     }
 
+    // 前面只有QMode=2的时候会提前返回，等于3、4的时候都会继续执行下面的逻辑;此外,对于QMode=0、1,也会先执行下面的逻辑：
+    // 1.如果EntryList的首元素非空，就取出来调用ExitEpilog方法，该方法会唤醒该ObjectWaiter对象的线程，然后立即返回；
+    // 2.如果EntryList的首元素为空，就将cxq的所有元素按其在cxq的原有顺序放入到EntryList中，
+    //   然后再从EntryList中取出来队首元素执行ExitEpilog方法，然后立即返回.
+
     // 如果EntryList不为空，则直接唤醒EntryList的队首元素
     w = _EntryList;
     if (w != NULL) {
@@ -1300,7 +1301,8 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
       assert(s != NULL, "invariant");
     } else {
       // QMode == 0 or QMode == 2
-      // 将cxq中的元素转移到EntryList
+      // QMode == 0 或 QMode == 2 ???
+      // 将cxq中的元素按原顺序转移到EntryList
       _EntryList = w;
       ObjectWaiter * q = NULL;
       ObjectWaiter * p;
