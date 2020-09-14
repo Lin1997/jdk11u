@@ -271,7 +271,7 @@ void ObjectMonitor::enter(TRAPS) {
   // and to reduce RTS->RTO cache line upgrades on SPARC and IA32 processors.
   Thread * const Self = THREAD;
 
-  // owner为null代表是无锁状态，如果能CAS设置_owner为当前线程成功，则当前线程直接获得锁.
+  // 若ObjectMonitor的owner为null，如果能CAS设置_owner为当前线程成功，则当前线程直接获得锁.
   void * cur = Atomic::cmpxchg(Self, &_owner, (void*)NULL);
   if (cur == NULL) {
     // Either ASSERT _recursions == 0 or explicitly set _recursions = 0.
@@ -337,7 +337,7 @@ void ObjectMonitor::enter(TRAPS) {
     event.set_monitorClass(((oop)this->object())->klass());
     event.set_address((uintptr_t)(this->object_addr()));
   }
-  
+
   { // Change java thread status to indicate blocked on monitor enter.
     // 改变Java Thread对象的状态为block
     JavaThreadBlockedOnMonitorEnterState jtbmes(jt, this);
