@@ -1142,7 +1142,7 @@ void InterpreterMacroAssembler::get_method_counters(Register method,
 }
 
 
-// 传入参数为表示当前对象锁的BasicObjectLock
+// 传入参数为表示当前对象锁的BasicObjectLock(Lock Record)
 // Lock object
 //
 // Args:
@@ -1174,7 +1174,7 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg) {
     const Register obj_reg = LP64_ONLY(c_rarg3) NOT_LP64(rcx); // Will contain the oop
 
     const int obj_offset = BasicObjectLock::obj_offset_in_bytes();          // BasicObjectLock对象的_obj成员的offset
-    const int lock_offset = BasicObjectLock::lock_offset_in_bytes ();       // BasicObjectLock对象的_lock成员的offset
+    const int lock_offset = BasicObjectLock::lock_offset_in_bytes ();       // BasicObjectLock对象的_lock成员(BasicLock)的offset
     const int mark_offset = lock_offset +                                   // BasicObjectLock对象的_lock成员(BasicLock)的
                             BasicLock::displaced_header_offset_in_bytes();  // displaced_header的offset
 

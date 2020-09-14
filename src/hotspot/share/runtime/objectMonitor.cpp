@@ -308,7 +308,7 @@ void ObjectMonitor::enter(TRAPS) {
   // transitions.  The following spin is strictly optional ...
   // Note that if we acquire the monitor from an initial spin
   // we forgo posting JVMTI events and firing DTRACE probes.
-  // 在调用系统的同步操作之前，先尝试自旋获得锁
+  // 在调用系统的同步操作之前，先尝试自适应自旋获得锁
   if (Knob_SpinEarly && TrySpin (Self) > 0) {
     //自旋的过程中获得了锁，则直接返回
     assert(_owner == Self, "invariant");
@@ -337,8 +337,9 @@ void ObjectMonitor::enter(TRAPS) {
     event.set_monitorClass(((oop)this->object())->klass());
     event.set_address((uintptr_t)(this->object_addr()));
   }
-
+  
   { // Change java thread status to indicate blocked on monitor enter.
+    // 改变Java Thread对象的状态为block
     JavaThreadBlockedOnMonitorEnterState jtbmes(jt, this);
 
     Self->set_current_pending_monitor(this);
@@ -1905,9 +1906,24 @@ void ObjectMonitor::notifyAll(TRAPS) {
 
 // -----------------------------------------------------------------------------
 // Adaptive Spinning Support
+// 自适应自旋的实现
 //
 // Adaptive spin-then-block - rational spinning
+// 自适应自旋后才尝试阻塞 —— 即 合理地自旋
 //
+// 我们在_owner字段上进行全局的自旋，使用经典的
+// 对称多处理机(SMP) test and test and set(TATAS) 算法.
+//
+// void acquireLock(bool *lock) {
+//    do {
+//          while (*lock) { }
+//    } while (testAndSet(lock));
+//  }
+//
+// 在高阶的对称多处理机系统(SMP)上， 最好是先短暂地全局自旋，然后再恢复为局部自旋.
+// 根据MCS/CLH队列(想想AQS)的算法思想，一个竞争线程可以将自己入队到cxq队列中，
+// 然后在线程私有的变量(比如说ParkEvent._Event标志)上进行局部自旋.
+// 这些留给读者自行研究.
 // Note that we spin "globally" on _owner with a classic SMP-polite TATAS
 // algorithm.  On high order SMP systems it would be better to start with
 // a brief global spin and then revert to spinning locally.  In the spirit of MCS/CLH,
@@ -1917,6 +1933,11 @@ void ObjectMonitor::notifyAll(TRAPS) {
 // not problematic on Niagara, as the L2 cache serves the interconnect and
 // has both low latency and massive bandwidth.
 //
+// 我们可以设置自旋的频率为100%，然后变动自旋次数(自旋时间);
+// 也可以将自旋次数设置为接近于（线程）上下文切换的时间，然后变动自旋的频率;
+// 当然也可以两者都变动，但是要满足 K == Frequency * Duration , 其中 K 由monitor自适应调整.
+// 其中自旋的频率，即竞争锁获取操作的尝试次数占我们设置的自旋次数的百分比.
+// 下面的实现选用第一种逻辑.
 // Broadly, we can fix the spin frequency -- that is, the % of contended lock
 // acquisition attempts where we opt to spin --  at 100% and vary the spin count
 // (duration) or we can fix the count at approximately the duration of
@@ -1925,6 +1946,11 @@ void ObjectMonitor::notifyAll(TRAPS) {
 // For a description of 'Adaptive spin-then-block mutual exclusion in
 // multi-threaded processing,' see U.S. Pat. No. 8046758.
 //
+// 本实现会变动自旋次数"D"， 它根据最近的自旋尝试的成功率来变动.
+// （D 的最大值近似于一次线程的往返上下文切换时间）. 最近自旋尝试的成功率是
+// 未来自旋尝试成功率的一个很好的预测。 这个机制会自动适应变动的临界区长度（锁模式）、
+// 系统负载和并行程度。 D 由每个monitor的_SpinDuration字段来维护， 并且它会被
+// 初始化为一个比较乐观的值。本实现中，自旋频率被设置在了100%.
 // This implementation varies the duration "D", where D varies with
 // the success rate of recent spin attempts. (D is capped at approximately
 // length of a round-trip context switch).  The success rate for recent
@@ -1934,6 +1960,9 @@ void ObjectMonitor::notifyAll(TRAPS) {
 // D is maintained per-monitor in _SpinDuration and is initialized
 // optimistically.  Spin frequency is fixed at 100%.
 //
+// 注意，_SpinDuration字段是volatile的，但是我们在更新它的时候没有加锁或使用原子性操作.
+// 实现的代码经过设计，因此尽管存在竞争，_SpinDuration也能保持在一个合理的范围里。
+// 尽管在最坏的情况会引入一些不确定性，但是由于自旋时间非常短，故在此极端情况下也是无害的。
 // Note that _SpinDuration is volatile, but we update it without locks
 // or atomics.  The code is designed so that _SpinDuration stays within
 // a reasonable range even in the presence of races.  The arithmetic
@@ -1943,6 +1972,7 @@ void ObjectMonitor::notifyAll(TRAPS) {
 // We might spin when we shouldn't or vice-versa, but since the spin
 // count are relatively short, even in the worst case, the effect is harmless.
 //
+// 注意，较低的“D”值不会成为"吸收态"(数学术语). 短暂的自旋失败不会影响自旋整体的优势.
 // Care must be taken that a low "D" value does not become an
 // an absorbing state.  Transient spinning failures -- when spinning
 // is overall profitable -- should not cause the system to converge
@@ -1951,6 +1981,8 @@ void ObjectMonitor::notifyAll(TRAPS) {
 // it to oscillate, become metastable, be "too" non-deterministic,
 // or converge on or enter undesirable stable absorbing states.
 //
+// 我们实现了一个基于反馈的控制系统——使用过去的行为来预测未来的行为.
+// 对于系统的一些”无伤大雅“的问题，从全局来看无需担心，因此我们也没有添加过分的优化机制来避免这些问题.
 // We implement a feedback-based control system -- using past behavior
 // to predict future behavior.  We face two issues: (a) if the
 // input signal is random then the spin predictor won't provide optimal
@@ -1983,6 +2015,9 @@ int ObjectMonitor::TrySpin(Thread * Self) {
 
   for (ctr = Knob_PreSpin + 1; --ctr >= 0;) {
     if (TryLock(Self) > 0) {
+      // 如果本次自旋获取锁成功,
+      // 则加大_SpinDuration值，
+      // 下次该对象获取锁可以多自旋一会.
       // Increase _SpinDuration ...
       // Note that we don't clamp SpinDuration precisely at SpinLimit.
       // Raising _SpurDuration to the poverty line is key.
@@ -1993,6 +2028,7 @@ int ObjectMonitor::TrySpin(Thread * Self) {
       }
       return 1;
     }
+    // pause 指令，用来提升退出自旋后CPU的性能.
     SpinPause();
   }
 

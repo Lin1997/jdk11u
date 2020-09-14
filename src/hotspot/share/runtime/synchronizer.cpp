@@ -1451,17 +1451,18 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread * Self,
     // Currently, we spin/yield/park and poll the markword, waiting for inflation to finish.
     // We could always eliminate polling by parking the thread on some auxiliary list.
     if (mark == markOopDesc::INFLATING()) {
-      TEVENT(Inflate: spin while INFLATING);
-      // 在该方法中会进行spin/yield/park等操作完成自旋动作
+      TEVENT(Inflate: spin while INFLATING);  // 打印日志
+      // 在该方法中会进行spin/yield/park等操作,等待另一个线程膨胀完成
       ReadStableMark(object);
-      continue; // continue重试
+      continue; // continue自旋重试
     }
 
     // case 3: 当前处于轻量级锁状态(可能是当前或其它线程持有).
-    // 为了减少锁升级的时间,我们做了些优化: 先分配ObjectMonitor对象,再设置INFLATING状态到Mark Word.
+    // 为了减少锁升级(处于INFLATING状态)的时间,我们做了些优化: 先分配ObjectMonitor对象,再设置INFLATING状态到Mark Word.
     // 我们还使用了线程私有的空闲objectmonitor列表,线程可以在需要时从全局空闲列表中移动多个objectmonitor到其私有列表,
-    // 这样可以减少全局空闲列表的锁竞争.通过这些线程本地的空闲列表,我们就可以自由地在CAS设置INFLATING状态前或后
-    // 调用omAlloc()方法获得ObjectMonitor对象.
+    // 这样可以减少全局空闲列表的锁竞争.由于有这些线程本地的空闲列表机制,在CAS设置INFLATING状态[前]或[后]
+    // 调用omAlloc()方法获得ObjectMonitor对象都是无关经要的.
+    // (个人理解：无需害怕因后面CAS失败而导致前面ObjectMonitor的分配成为 无效/多余 的？)
     // CASE: stack-locked
     // Could be stack-locked either by this thread or by some other thread.
     //
@@ -1487,6 +1488,7 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread * Self,
       // Optimistically prepare the objectmonitor - anticipate successful CAS
       // We do this before the CAS in order to minimize the length of time
       // in which INFLATING appears in the mark.
+      // 清空和初始化分配的ObjectMonitor
       m->Recycle();
       m->_Responsible  = NULL;
       m->_recursions   = 0;
@@ -1508,7 +1510,7 @@ ObjectMonitor* ObjectSynchronizer::inflate(Thread * Self,
       //
       // 至于为什么轻量级锁需要一个膨胀中（INFLATING）状态?
       // 简而言之就是防止这个函数进行锁升级(成重量级锁)的时候,原锁拥有线程进行了锁释放,
-      // 导致Mark Word的hashCode部分被改变的情况.所以需要一个中间态INFLATING来表示"忙"标志,
+      // 可能导致Mark Word的hashCode部分被改变的情况.所以需要一个中间态INFLATING来表示"忙"标志,
       // 让锁释放流程先自旋等待"忙"标志取消.
       // Why do we CAS a 0 into the mark-word instead of just CASing the
       // mark-word from the stack-locked value directly to the new inflated state?

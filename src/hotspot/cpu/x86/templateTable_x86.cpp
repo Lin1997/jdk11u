@@ -4366,9 +4366,10 @@ void TemplateTable::monitorenter() {
   // 计算monitor block top的地址
   const Address monitor_block_top(
         rbp, frame::interpreter_frame_monitor_block_top_offset * wordSize);
-  // 计算monitor block bot的地址 = monitor block top的地址
+  // 计算monitor block bot的地址(初始时 == monitor block top)
   const Address monitor_block_bot(
         rbp, frame::interpreter_frame_initial_sp_offset * wordSize);
+  // 每一个monitor entry(Lock Record)的大小
   const int entry_size = frame::interpreter_frame_monitor_size() * wordSize;
 
   Label allocated;
@@ -4381,7 +4382,7 @@ void TemplateTable::monitorenter() {
   __ xorl(rmon, rmon); // points to free slot or NULL
 
   // 从顶至底(低地址向高地址)遍历monitor block(栈结构如上面注释),
-  // 寻找一个空闲的monitor entry(BasicObjectLock)，并将指针保存至rmon
+  // 寻找一个空闲的monitor entry(BasicObjectLock/Lock Record)，并将指针保存至rmon
   // find a free slot in the monitor block (result in rmon)
   {
     // 声明三个Label
@@ -4401,7 +4402,7 @@ void TemplateTable::monitorenter() {
     // 若未使用就记录至rmon
     // if not used then remember entry in rmon
     __ cmovptr(Assembler::equal, rmon, rtop);   // cmov => cmovptr
-    // 检查BasicObjectLock的_obj属性是否就是被锁对象(lockee)
+    // 检查BasicObjectLock(Lock Record)的_obj属性是否就是被锁对象(lockee)
     // check if current entry is for same object
     __ cmpptr(rax, Address(rtop, BasicObjectLock::obj_offset_in_bytes()));
     // 是的话代表这是锁重入，就跳转到exit标签，停止搜索

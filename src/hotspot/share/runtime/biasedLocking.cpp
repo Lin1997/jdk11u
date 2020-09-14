@@ -267,12 +267,15 @@ static BiasedLocking::Condition revoke_bias(oop obj, bool allow_rebias, bool is_
   }
 
   // case 3: 对象当前偏向的线程依然存活.
-  // 注释解释了逻辑：
+  // 再次检查这个线程是否拥有锁，如果是的话，
+  // 把对象的Mark Word备份到这个线程的displaced headers里.
+  // 否则，对象的Mark Word还原为无锁状态或者匿名偏向状态.
   // Thread owning bias is alive.
   // Check to see whether it currently owns the lock and, if so,
   // write down the needed displaced headers to the thread's stack.
   // Otherwise, restore the object's header either to the unlocked
   // or unbiased state.
+
   // get_or_compute_monitor_info(...)返回对象头偏向线程的所有的被锁住的对象的监视器信息，
   // 即线程栈所有的Lock Record.
   GrowableArray<MonitorInfo*>* cached_monitor_info = get_or_compute_monitor_info(biased_thread);
@@ -372,7 +375,7 @@ enum HeuristicsResult {
 static HeuristicsResult update_heuristics(oop o, bool allow_rebias) {
   markOop mark = o->mark();
   if (!mark->has_bias_pattern()) {
-    // 不可偏向直接返回
+    // 已经不是可偏向状态，直接返到ObjectSynchronizer::fast_enter(...)执行slow_enter获取重量级锁
     return HR_NOT_BIASED;
   }
 
@@ -741,7 +744,7 @@ BiasedLocking::Condition BiasedLocking::revoke_and_rebias(Handle obj, bool attem
       return BIAS_REVOKED;
     }
   } else if (mark->has_bias_pattern()) {
-    // case 2: 锁对象开启了偏向模式会走到这里
+    // case 2: 锁对象处于可偏向模式会走到这里
     Klass* k = obj->klass();
     markOop prototype_header = k->prototype_header();
     if (!prototype_header->has_bias_pattern()) {  // case 2.1: 如果对应class的prototype_header关闭了偏向模式，则进行取消偏向锁操作

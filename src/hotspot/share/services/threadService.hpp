@@ -570,6 +570,7 @@ class JavaThreadBlockedOnMonitorEnterState : public JavaThreadStatusChanger {
     _active = false;
     if (is_alive() && obj_m->contentions() > 0) {
       _stat = java_thread->get_thread_stat();
+      // 将Java Thread对象设置为BLOCK状态
       _active = contended_enter_begin(java_thread);
     }
   }

@@ -1160,7 +1160,7 @@ int MacroAssembler::biased_locking_enter(Register lock_reg,
   cmpptr(tmp_reg, markOopDesc::biased_lock_pattern);
   jcc(Assembler::notEqual, cas_label);
 
-  // 偏向字段存放在对象头中，现在需要检查对象的偏向线程和epoch值是否是当前的
+  // 对象头表明偏向字段仍有效，现在需要检查对象的偏向线程和epoch值是否是当前的
   // The bias pattern is present in the object's header. Need to check
   // whether the bias owner and the epoch are both still current.
 #ifndef _LP64
@@ -1195,10 +1195,11 @@ int MacroAssembler::biased_locking_enter(Register lock_reg,
   xorptr(swap_reg, tmp_reg);
   Register header_reg = swap_reg;
 #endif
+  // 将上面异或得到的结果中的分代年龄给忽略掉:
   // 对markOopDesc::age_mask_in_place(..0001111000)进行按位取反，
   // 变成了...1110000111,除了分代年龄那4位，其他位全为1；
   // 将取反后的结果再与header_reg相与，这样就把header_reg中除了分代年龄之外的其他位取了出来，
-  // 即将上面异或得到的结果中分代年龄给忽略掉
+  // 即忽略掉分代年龄
   andptr(header_reg, ~((int) markOopDesc::age_mask_in_place));
   if (counters != NULL) {
     cond_inc32(Assembler::zero,
@@ -1241,7 +1242,7 @@ int MacroAssembler::biased_locking_enter(Register lock_reg,
   // illegal.
   // 之前的异或结果epoch位是否为0
   // 不为0代表不相等，表明类在对象分配后发生过bulk_rebais
-  // （前面提到过，每次发生bulk_rebaise,类的prototype header中的epoch都会+1）
+  // （每次发生bulk_rebaise,类的prototype header中的epoch都会+1）
   // 所以之前对象的偏向就无效了，需要进行重偏向，转跳到try_rebias标签
   testptr(header_reg, markOopDesc::epoch_mask_in_place);
   jccb(Assembler::notZero, try_rebias);
