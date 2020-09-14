@@ -4786,6 +4786,7 @@ void Threads::print_threads_compiling(outputStream* st, char* buf, int buflen, b
 
 typedef volatile int SpinLockT;
 
+// 一种自旋锁的实现
 void Thread::SpinAcquire(volatile int * adr, const char * LockName) {
   if (Atomic::cmpxchg (1, adr, 0) == 0) {
     return;   // normal fast-path return
@@ -4793,12 +4794,17 @@ void Thread::SpinAcquire(volatile int * adr, const char * LockName) {
 
   // Slow-path : We've encountered contention -- Spin/Yield/Block strategy.
   TEVENT(SpinAcquire - ctx);
-  int ctr = 0;
+  int ctr = 0;  // 其实就是个计数器
   int Yields = 0;
   for (;;) {
     while (*adr != 0) {
       ++ctr;
+      // 如果我尝试的次数大于 0xfff，或者当前系统是一个单核处理器系统，
+      // 那么就执行下面的逻辑; 否则直接执行 SpinPause()
       if ((ctr & 0xFFF) == 0 || !os::is_MP()) {
+        // 首先会尝试通过 yield 函数来将当前线程让出时间片
+        // 如果让了 5 次还是没有获得锁,
+        // 那就只能通过 naked_short_sleep 来短暂休眠等待了
         if (Yields > 5) {
           os::naked_short_sleep(1);
         } else {

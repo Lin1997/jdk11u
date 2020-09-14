@@ -488,6 +488,7 @@ ObjectLocker::~ObjectLocker() {
 // NOTE: must use heavy weight monitor to handle wait()
 int ObjectSynchronizer::wait(Handle obj, jlong millis, TRAPS) {
   if (UseBiasedLocking) {
+    // 如果开启了偏向锁,先撤销偏向锁
     BiasedLocking::revoke_and_rebias(obj, false, THREAD);
     assert(!obj->mark()->has_bias_pattern(), "biases should be revoked by now");
   }
@@ -495,11 +496,13 @@ int ObjectSynchronizer::wait(Handle obj, jlong millis, TRAPS) {
     TEVENT(wait - throw IAX);
     THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(), "timeout value is negative");
   }
+  // 然后将锁升级为重量级锁
   ObjectMonitor* monitor = ObjectSynchronizer::inflate(THREAD,
                                                        obj(),
                                                        inflate_cause_wait);
 
   DTRACE_MONITOR_WAIT_PROBE(monitor, obj(), THREAD, millis);
+  // 接着使用ObjectMonitor#wait(...)进行让锁等待.
   monitor->wait(millis, true, THREAD);
 
   // This dummy call is in place to get around dtrace bug 6254741.  Once
@@ -525,6 +528,7 @@ void ObjectSynchronizer::waitUninterruptibly(Handle obj, jlong millis, TRAPS) {
 
 void ObjectSynchronizer::notify(Handle obj, TRAPS) {
   if (UseBiasedLocking) {
+    // 如果开启了偏向锁,先撤销偏向锁
     BiasedLocking::revoke_and_rebias(obj, false, THREAD);
     assert(!obj->mark()->has_bias_pattern(), "biases should be revoked by now");
   }
@@ -533,9 +537,10 @@ void ObjectSynchronizer::notify(Handle obj, TRAPS) {
   if (mark->has_locker() && THREAD->is_lock_owned((address)mark->locker())) {
     return;
   }
+  // 然后将锁升级为重量级锁
   ObjectSynchronizer::inflate(THREAD,
                               obj(),
-                              inflate_cause_notify)->notify(THREAD);
+                              inflate_cause_notify)->notify(THREAD);  // 接着调用ObjectMonitor#notify(...).
 }
 
 // NOTE: see comment of notify()

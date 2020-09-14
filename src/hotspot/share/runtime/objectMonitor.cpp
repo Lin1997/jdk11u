@@ -271,7 +271,7 @@ void ObjectMonitor::enter(TRAPS) {
   // and to reduce RTS->RTO cache line upgrades on SPARC and IA32 processors.
   Thread * const Self = THREAD;
 
-  // 若ObjectMonitor的owner为null，如果能CAS设置_owner为当前线程成功，则当前线程直接获得锁.
+  // 若当前ObjectMonitor的owner为null，如果能CAS设置_owner为当前线程成功，则当前线程直接获得锁.
   void * cur = Atomic::cmpxchg(Self, &_owner, (void*)NULL);
   if (cur == NULL) {
     // Either ASSERT _recursions == 0 or explicitly set _recursions = 0.
@@ -460,10 +460,12 @@ int ObjectMonitor::TryLock(Thread * Self) {
 // 大致原理:
 // 一个ObjectMonitor对象包括这么几个关键字段：
 // cxq（ContentionList），EntryList ，WaitSet和owner.
-// 其中cxq ，EntryList ，WaitSet都是由ObjectWaiter的链表结构，owner指向持有锁的线程。
+// 其中cxq ，EntryList ，WaitSet都是由ObjectWaiter的链表结构，其owner指向持有锁的线程。
+// 它们的作用可以看:
+// [深入JVM锁机制1-synchronized](https://blog.csdn.net/chen77716/article/details/6618779)
 // 当一个线程尝试获得锁时，如果该锁已经被占用，则会将该线程封装成一个ObjectWaiter对象,
 // 插入到cxq的队列的队首，然后调用park函数挂起当前线程。
-// 在Linux系统上，park函数底层调用的是gclib库的pthread_cond_wait，
+// 在Linux系统上，park函数底层调用的是glibc库的pthread_cond_wait，
 // JDK的ReentrantLock底层也是用该方法挂起线程的,
 // 关于Linux同步更多细节可以看:
 // [关于同步的一点思考](https://github.com/farmerjohngit/myblog/issues/7)
@@ -625,7 +627,10 @@ void ObjectMonitor::EnterI(TRAPS) {
     // park self
     if (_Responsible == Self || (SyncFlags & 1)) {
       // 当前线程是_Responsible时，调用带时间参数的park
-      // 防止出现"饥饿"现象
+      // 防止出现"饥饿"现象.
+      // 简单的「退避算法」:
+      // 第一次等待 1 ms，第二次等待 8 ms，第三次等待 64 ms，以此类推，
+      // 直到达到等待时长的上线：MAX_RECHECK_INTERVAL.
       TEVENT(Inflated enter - park TIMED);
       Self->_ParkEvent->park((jlong) recheckInterval);
       // Increase the recheckInterval, but clamp the value.
@@ -1303,10 +1308,13 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
     } else {
       // QMode == 0 or QMode == 2
       // QMode == 0 或 QMode == 2 ???
-      // 将cxq中的元素按原顺序转移到EntryList
+      // 设置_EntryList的队头节点设置为cxq的队头节点,
+      // 相当于将cxq中的元素按原顺序转移到EntryList.
       _EntryList = w;
       ObjectWaiter * q = NULL;
       ObjectWaiter * p;
+      // 将原本的单向链表变成双向链表, 方便后面进行查询
+      // 同时设置节点状态为TS_ENTER, 表明进入了_EntryList队列
       for (p = w; p != NULL; p = p->_next) {
         guarantee(p->TState == ObjectWaiter::TS_CXQ, "Invariant");
         p->TState = ObjectWaiter::TS_ENTER;
@@ -1324,7 +1332,9 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
     // context-switch rate.
     if (_succ != NULL) continue;
 
-    // 唤醒EntryList第一个元素
+    // 将_EntryList队头的节点
+    // 传递给ExitEpilog函数,
+    // 将唤醒EntryList的头节点.
     w = _EntryList;
     if (w != NULL) {
       guarantee(w->TState == ObjectWaiter::TS_ENTER, "invariant");
@@ -1393,6 +1403,7 @@ void ObjectMonitor::ExitEpilog(Thread * Self, ObjectWaiter * Wakee) {
   // 2. ST _owner = NULL
   // 3. unpark(wakee)
 
+  // 设置_succ为EntryList的头节点
   _succ = Knob_SuccEnabled ? Wakee->_thread : NULL;
   ParkEvent * Trigger = Wakee->_event;
 
@@ -1410,6 +1421,7 @@ void ObjectMonitor::ExitEpilog(Thread * Self, ObjectWaiter * Wakee) {
   }
 
   DTRACE_MONITOR_PROBE(contended__exit, this, object(), Self);
+  // unpark线程
   Trigger->unpark();
 
   // Maintain stats and report events to JVMTI
@@ -1530,6 +1542,7 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
 
   EventJavaMonitorWait event;
 
+  // 判断一下当前线程是否为可中断并且是否已经被中断
   // check for a pending interrupt
   if (interruptible && Thread::is_interrupted(Self, true) && !HAS_PENDING_EXCEPTION) {
     // post monitor waited event.  Note that this is past-tense, we are done waiting.
@@ -1550,6 +1563,7 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
       post_monitor_wait_event(&event, this, 0, millis, false);
     }
     TEVENT(Wait - Throw IEX);
+    // 抛出异常，不会直接进入等待
     THROW(vmSymbols::java_lang_InterruptedException());
     return;
   }
@@ -1560,6 +1574,7 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
   Self->_Stalled = intptr_t(this);
   jt->set_current_waiting_monitor(this);
 
+  // 首先会根据 Self 当前线程新建一个 ObjectWaiter 对象节点
   // create a node to be put into the queue
   // Critically, after we reset() the event but prior to park(), we must check
   // for a pending interrupt.
@@ -1575,8 +1590,11 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
   // returns because of a timeout of interrupt.  Contention is exceptionally rare
   // so we use a simple spin-lock instead of a heavier-weight blocking lock.
 
+  // 在自旋锁的保护下，
   Thread::SpinAcquire(&_WaitSetLock, "WaitSet - add");
+  // 将 node 插入双向链表 WaitSet 的尾部,
   AddWaiter(&node);
+  // 然后释放自旋锁.
   Thread::SpinRelease(&_WaitSetLock);
 
   if ((SyncFlags & 4) == 0) {
@@ -1585,9 +1603,11 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
   intptr_t save = _recursions; // record the old recursion count
   _waiters++;                  // increment the number of waiters
   _recursions = 0;             // set the recursion level to be 1
+  // Java Object 的 wait 操作会释放 monitor 锁，释放操作就是这里实现的
   exit(true, Self);                    // exit the monitor
   guarantee(_owner != Self, "invariant");
 
+  // 释放完锁，接下来就需要将当前线程进行 park 等待了
   // The thread is on the WaitSet list - now park() it.
   // On MP systems it's conceivable that a brief spin before we park
   // could be profitable.
@@ -1597,6 +1617,8 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
 
   int ret = OS_OK;
   int WasNotified = 0;
+  // 设置Java Thread状态为OBJECT_WAIT,
+  // 然后park线程.
   { // State transition wrappers
     OSThread* osthread = Self->osthread();
     OSThreadWaitState osts(osthread, true);
@@ -1605,7 +1627,9 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
       // Thread is in thread_blocked state and oop access is unsafe.
       jt->set_suspend_equivalent();
 
+      // 在正式 park 之前，还会再一次看下是否有 interrupted
       if (interruptible && (Thread::is_interrupted(THREAD, false) || HAS_PENDING_EXCEPTION)) {
+        // 如果有的话就会跳过 park 操作
         // Intentionally empty
       } else if (node._notified == 0) {
         if (millis <= 0) {
@@ -1750,11 +1774,21 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
 // If the lock is cool (cxq == null && succ == null) and we're on an MP system
 // then instead of transferring a thread from the WaitSet to the EntryList
 // we might just dequeue a thread from the WaitSet and directly unpark() it.
-
+//
+// 首先会从 WaitSet 队列中出队一个节点，然后针对这个节点根据
+// Knob_MoveNotifyee 来决定执行不同策略逻辑:
+// 策略 0：将需要唤醒的 node 放到 EntryList 的头部;
+// 策略 1：将需要唤醒的 node 放到 EntryList 的尾部;
+// 策略 2：将需要唤醒的 node 放到 CXQ 的头部; (PS: EntryList为空的话，第一个被notify的线程会进入到EntryList;后面的放到 CXQ 的头部)
+// 策略 3：将需要唤醒的 node 放到 CXQ 的尾部.
+// 默认为策略2.
+// 你会发现这里全是队列的操作，并没有唤醒线程，
+// 真正的唤醒操作在exit中.
 void ObjectMonitor::INotify(Thread * Self) {
   const int policy = Knob_MoveNotifyee;
 
   Thread::SpinAcquire(&_WaitSetLock, "WaitSet - notify");
+  // 将 WaitSet 队列中的第一个 node 出队
   ObjectWaiter * iterator = DequeueWaiter();
   if (iterator != NULL) {
     TEVENT(Notify1 - Transfer);
@@ -1870,12 +1904,14 @@ void ObjectMonitor::INotify(Thread * Self) {
 
 void ObjectMonitor::notify(TRAPS) {
   CHECK_OWNER();
+  // 先会检查 WaitSet 队列是否为空
   if (_WaitSet == NULL) {
     TEVENT(Empty-Notify);
     return;
   }
+  // 不为空表示有线程在这个 monitor 上 wait 了
   DTRACE_MONITOR_PROBE(notify, this, object(), THREAD);
-  INotify(THREAD);
+  INotify(THREAD);  // 通过INotify唤醒某个线程
   OM_PERFDATA_OP(Notifications, inc(1));
 }
 
@@ -1886,7 +1922,9 @@ void ObjectMonitor::notify(TRAPS) {
 // that in prepend-mode we invert the order of the waiters. Let's say that the
 // waitset is "ABCD" and the EntryList is "XYZ". After a notifyAll() in prepend
 // mode the waitset will be empty and the EntryList will be "DCBAXYZ".
-
+// notifyAll 的实现其实和 notify 实现大同小异,
+// 其实就是根据 WaitSet 长度，反复调用 INotify 函数，
+// 相当于多次调用 notify.
 void ObjectMonitor::notifyAll(TRAPS) {
   CHECK_OWNER();
   if (_WaitSet == NULL) {

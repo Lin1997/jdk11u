@@ -4308,6 +4308,7 @@ void os::naked_short_sleep(jlong ms) {
     req.tv_nsec = 1;
   }
 
+  // 通过 nanosleep 系统调用实现线程的 timed waiting
   nanosleep(&req, NULL);
 
   return;
